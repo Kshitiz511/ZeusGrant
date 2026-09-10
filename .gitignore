@@ -34,3 +34,10 @@ platform/.env
 *.njsproj
 *.sln
 *.sw?
+
+# This GitHub repo is platform-only. Keep legacy/Lovable app files local as
+# reference, but don't track them from the workspace root.
+*
+!.gitignore
+!platform/
+!platform/**
