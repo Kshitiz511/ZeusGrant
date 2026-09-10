@@ -1,0 +1,181 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Design system definition.
+ *
+ * The @theme inline block maps CSS custom properties to Tailwind utility
+ * classes (e.g. --color-primary -> bg-primary, text-primary).
+ *
+ * The :root and .dark blocks define the actual color values using oklch.
+ * All colors MUST use oklch format.
+ *
+ * To add a new semantic color:
+ * 1. Add the variable to :root (light value) and .dark (dark value)
+ * 2. Register it in @theme inline as --color-<name>: var(--<name>)
+ */
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+  --font-sans: "Figtree", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Figtree", ui-sans-serif, system-ui, sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-deep: var(--primary-deep);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-ink: var(--ink);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-ring-offset-background: var(--background);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}
+
+:root {
+  --radius: 0.5rem;
+
+  /* Zeus Consulting brand */
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 89.9);
+  --ink: oklch(0.145 0 89.9);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 89.9);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 89.9);
+
+  --primary: oklch(0.456 0.274 264.3); /* #022eeb */
+  --primary-foreground: oklch(1 0 0);
+  --primary-deep: oklch(0.35 0.216 264.2);
+
+  --secondary: oklch(0.973 0.003 264.5);
+  --secondary-foreground: oklch(0.145 0 89.9);
+
+  --muted: oklch(0.973 0.003 264.5);
+  --muted-foreground: oklch(0.5 0.02 264.5);
+
+  --accent: oklch(0.745 0.182 133.9); /* #7ac43d */
+  --accent-foreground: oklch(0.145 0 89.9);
+
+  --success: oklch(0.745 0.182 133.9);
+  --success-foreground: oklch(0.145 0 89.9);
+  --warning: oklch(0.82 0.16 84);
+  --warning-foreground: oklch(0.145 0 89.9);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(1 0 0);
+
+  --border: oklch(0.919 0.005 264.5);
+  --input: oklch(0.919 0.005 264.5);
+  --ring: oklch(0.456 0.274 264.3);
+
+  --chart-1: oklch(0.456 0.274 264.3);
+  --chart-2: oklch(0.745 0.182 133.9);
+  --chart-3: oklch(0.35 0.216 264.2);
+  --chart-4: oklch(0.82 0.16 84);
+  --chart-5: oklch(0.5 0.02 264.5);
+
+  --sidebar: oklch(0.145 0 89.9);
+  --sidebar-foreground: oklch(0.973 0.003 264.5);
+  --sidebar-primary: oklch(0.456 0.274 264.3);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.25 0.01 264.5);
+  --sidebar-accent-foreground: oklch(0.973 0.003 264.5);
+  --sidebar-border: oklch(0.28 0.01 264.5);
+  --sidebar-ring: oklch(0.456 0.274 264.3);
+
+  /* Brand effects */
+  --gradient-brand: linear-gradient(135deg, var(--primary-deep), var(--primary) 60%, oklch(0.6 0.2 250));
+  --gradient-accent: linear-gradient(120deg, var(--primary), var(--accent));
+  --gradient-surface: linear-gradient(180deg, oklch(0.985 0.004 264.5), oklch(1 0 0));
+  --shadow-soft: 0 1px 2px oklch(0.145 0 0 / 6%), 0 8px 24px -12px oklch(0.145 0 0 / 12%);
+  --shadow-lift: 0 24px 60px -24px oklch(0.456 0.274 264.3 / 35%);
+  --transition-base: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+  }
+}
+
+@layer base {
+  body {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3, h4 {
+    font-family: var(--font-display);
+    letter-spacing: -0.025em;
+    font-weight: 800;
+  }
+}
+
+@utility bg-brand-gradient {
+  background-image: var(--gradient-brand);
+}
+
+@utility bg-accent-gradient {
+  background-image: var(--gradient-accent);
+}
+
+@utility bg-surface-gradient {
+  background-image: var(--gradient-surface);
+}
+
+@utility shadow-soft {
+  box-shadow: var(--shadow-soft);
+}
+
+@utility shadow-lift {
+  box-shadow: var(--shadow-lift);
+}
+
+@utility text-gradient-brand {
+  background-image: var(--gradient-accent);
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}

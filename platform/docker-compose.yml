@@ -1,0 +1,128 @@
+# ---------------------------------------------------------------------------
+# Local development stack. Gives production parity for the stateful pieces
+# (Postgres, Redis) that Vercel cannot host, plus the FastAPI services.
+#
+#   docker compose up --build
+#
+# The core service applies migrations on start via the `migrate` one-shot.
+# Secrets here are LOCAL ONLY throwaways — never reuse in any real environment.
+# ---------------------------------------------------------------------------
+name: zeus-platform
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: zeus
+      POSTGRES_PASSWORD: zeus
+      POSTGRES_DB: zeus
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zeus"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: apply SQL migrations in order, then exit.
+  migrate:
+    image: postgres:16-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: zeus
+    volumes:
+      - ./services/platform-core/migrations:/migrations/00-platform-core:ro
+      - ./services/contract-compliance/migrations:/migrations/10-contract-compliance:ro
+    entrypoint:
+      - sh
+      - -c
+      - |
+        # Platform schema must exist before module schemas. Directory prefixes
+        # (00-, 10-) enforce cross-service ordering; files within sort by name.
+        for f in $$(ls /migrations/*/*.sql | sort); do
+          echo "applying $$f";
+          psql -h postgres -U zeus -d zeus -v ON_ERROR_STOP=1 -f "$$f";
+        done
+
+  platform-core:
+    build:
+      context: .
+      args:
+        MODULE: zeus_platform_core.app:create_app
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment:
+      ZEUS_ENV: development
+      ZEUS_DEV_TOKENS: "true"
+      ZEUS_SECRETS_ENCRYPTION_KEY: "${ZEUS_SECRETS_ENCRYPTION_KEY:-}"
+      ZEUS_DATABASE_PROVIDER: postgres
+      # zeus_app is NOSUPERUSER/non-owner so RLS policies apply (see 0002_rls.sql).
+      ZEUS_DATABASE_URL: postgresql://zeus_app:zeus_app@postgres:5432/zeus
+      ZEUS_CACHE_PROVIDER: redis
+      ZEUS_REDIS_URL: redis://redis:6379/0
+      ZEUS_QUEUE_PROVIDER: memory
+      ZEUS_AUTH_PROVIDER: supabase
+      ZEUS_SUPABASE_JWT_SECRET: "local-dev-jwt-secret-please-change"
+      # LLM: point at the host's Ollama (macOS/Windows Docker Desktop DNS name).
+      ZEUS_LLM_PROVIDER: "${ZEUS_LLM_PROVIDER:-ollama}"
+      ZEUS_LLM_MODEL: "${ZEUS_LLM_MODEL:-gemma3:4b}"
+      ZEUS_OLLAMA_BASE_URL: "${ZEUS_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}"
+      ZEUS_OPENAI_API_KEY: "${ZEUS_OPENAI_API_KEY:-}"
+    ports:
+      - "8000:8000"
+
+  contract-compliance:
+    build:
+      context: .
+      args:
+        MODULE: zeus_contract_compliance.app:create_app
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment:
+      ZEUS_ENV: development
+      ZEUS_DATABASE_PROVIDER: postgres
+      ZEUS_DATABASE_URL: postgresql://zeus_app:zeus_app@postgres:5432/zeus
+      ZEUS_CACHE_PROVIDER: redis
+      ZEUS_REDIS_URL: redis://redis:6379/0
+      ZEUS_QUEUE_PROVIDER: memory
+      ZEUS_AUTH_PROVIDER: supabase
+      ZEUS_SUPABASE_JWT_SECRET: "local-dev-jwt-secret-please-change"
+      ZEUS_LLM_PROVIDER: "${ZEUS_LLM_PROVIDER:-ollama}"
+      ZEUS_LLM_MODEL: "${ZEUS_LLM_MODEL:-gemma3:4b}"
+      ZEUS_OLLAMA_BASE_URL: "${ZEUS_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}"
+      ZEUS_OPENAI_API_KEY: "${ZEUS_OPENAI_API_KEY:-}"
+    ports:
+      - "8001:8000"
+
+  # Web console: static build behind nginx, proxying /api/* to the services.
+  console:
+    build:
+      context: ./apps/console
+    depends_on:
+      - platform-core
+      - contract-compliance
+    ports:
+      - "5174:80"
+
+volumes:
+  pgdata:

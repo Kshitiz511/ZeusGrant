@@ -1,0 +1,41 @@
+[project]
+name = "zeus-platform"
+version = "0.0.0"
+description = "Zeus Platform monorepo root (uv workspace)"
+requires-python = ">=3.12"
+# The root is a virtual project; real code lives in the workspace members.
+dependencies = [
+    "zeus-config",
+    "zeus-adapters",
+    "zeus-service-kit",
+    "zeus-platform-core",
+    "zeus-contract-compliance",
+]
+
+[tool.uv.workspace]
+members = ["packages/*", "services/*"]
+
+[tool.uv.sources]
+zeus-config = { workspace = true }
+zeus-adapters = { workspace = true }
+zeus-service-kit = { workspace = true }
+zeus-platform-core = { workspace = true }
+zeus-contract-compliance = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "mypy>=1.11",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
