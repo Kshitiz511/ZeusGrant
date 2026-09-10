@@ -1,6 +1,6 @@
-# Welcome to your Lovable project
+# ZeusGrant
 
-This project was built with [Lovable](https://lovable.dev).
+Grant management platform built with [Lovable](https://lovable.dev), plus the new Zeus modular platform workspace under `platform/`.
 
 ## Build with Lovable
 
@@ -20,6 +20,8 @@ cd <repository-name>
 npm i
 npm run dev
 ```
+
+The new Zeus backend/services workspace lives in `platform/`.
 
 ## Built with
 
