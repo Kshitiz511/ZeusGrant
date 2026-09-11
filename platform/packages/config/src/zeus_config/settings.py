@@ -32,7 +32,10 @@ class _Base(BaseSettings):
 
 class LlmSettings(_Base):
     provider: str = Field(default="openai", alias="ZEUS_LLM_PROVIDER")
-    model: str = Field(default="gpt-4o-mini", alias="ZEUS_LLM_MODEL")
+    # gpt-5-mini is the only model we are priced and tested against. The owner
+    # can change it from the admin dashboard, but the default should never be a
+    # model whose cost we have not measured.
+    model: str = Field(default="gpt-5-mini", alias="ZEUS_LLM_MODEL")
     timeout_seconds: int = Field(default=60, alias="ZEUS_LLM_TIMEOUT_SECONDS")
     openai_api_key: SecretStr | None = Field(default=None, alias="ZEUS_OPENAI_API_KEY")
     anthropic_api_key: SecretStr | None = Field(default=None, alias="ZEUS_ANTHROPIC_API_KEY")
