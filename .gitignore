@@ -41,3 +41,8 @@ platform/.env
 !.gitignore
 !platform/
 !platform/**
+# CI config lives at the repo root, so it needs the same allowlisting as
+# platform/. Without both lines git never descends into the directory and
+# silently drops the workflows from every commit -- which it did once already.
+!.github/
+!.github/**

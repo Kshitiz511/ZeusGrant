@@ -1,0 +1,91 @@
+name: Deploy
+
+# Production deploys happen here and only here, so what is running is always a
+# commit on main that passed the gate. Deploying from a laptop leaves no record
+# of what was shipped and skips the tests.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # manual redeploy without an empty commit
+
+concurrency:
+  # Never let two deploys race; a slow one must not overwrite a newer one.
+  group: production
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    # Reuses ci.yml rather than duplicating it, so the gate cannot drift from
+    # what PRs are checked against.
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: gate
+    runs-on: ubuntu-latest
+    environment: production
+    defaults:
+      run:
+        working-directory: platform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Pull Vercel environment
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+
+      - name: Build
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+
+      - name: Deploy
+        id: deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          url=$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Deployed to $url"
+
+      - name: Smoke test
+        # A green build is not a working deployment. This is the minimum proof
+        # that the function actually boots and its dependencies resolve.
+        run: |
+          set -euo pipefail
+          url="${{ steps.deploy.outputs.url }}"
+          for attempt in 1 2 3 4 5; do
+            code=$(curl -s -o /tmp/health.json -w '%{http_code}' "$url/api/health" || true)
+            if [ "$code" = "200" ]; then
+              cat /tmp/health.json
+              exit 0
+            fi
+            echo "attempt $attempt: HTTP $code"
+            cat /tmp/health.json 2>/dev/null || true
+            sleep 5
+          done
+          echo "Health check failed; rolling back."
+          exit 1
+
+      - name: Roll back on failed smoke test
+        if: failure() && steps.deploy.outcome == 'success'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        # Promotes the previous good deployment back to the alias rather than
+        # leaving a broken one serving traffic.
+        run: vercel rollback --yes --token="$VERCEL_TOKEN"

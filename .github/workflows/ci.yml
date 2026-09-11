@@ -1,0 +1,98 @@
+name: CI
+
+# Every push and PR runs the full gate. Deployment is a separate workflow that
+# depends on this one, so nothing reaches production without passing here.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call: # lets deploy.yml reuse this as a gate
+
+defaults:
+  run:
+    working-directory: platform
+
+jobs:
+  backend:
+    name: Backend (lint + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync workspace
+        run: uv sync --all-extras --dev
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Tests
+        # Unit and integration tests only; they use fakes, so no secrets and no
+        # network. The suites that need live infrastructure run in deploy.yml
+        # against the real deployment.
+        run: uv run pytest -q
+
+  frontend:
+    name: Console (typecheck + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: platform/apps/console/package-lock.json
+
+      - name: Install
+        run: npm ci
+        working-directory: platform/apps/console
+
+      - name: Typecheck and build
+        # `npm run build` is `tsc -b && vite build`, so a type error fails here
+        # rather than shipping a broken bundle.
+        run: npm run build
+        working-directory: platform/apps/console
+
+  migrations:
+    name: Migrations apply cleanly
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: zeus
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Apply migrations to a throwaway database
+        # Catches a migration that only works against a database which already
+        # has the previous state -- the failure mode that bites on a fresh
+        # environment rather than in local development.
+        env:
+          ZEUS_MIGRATE_URL: postgresql://postgres:postgres@localhost:5432/zeus
+        run: uv run --with asyncpg python scripts/migrate.py
+
+      - name: Verify schema invariants
+        # Asserts RLS is enabled AND forced. ENABLE alone exempts the table
+        # owner, which is exactly the gap that was invisible locally.
+        env:
+          ZEUS_MIGRATE_URL: postgresql://postgres:postgres@localhost:5432/zeus
+        run: uv run --with asyncpg python scripts/verify_schema.py
