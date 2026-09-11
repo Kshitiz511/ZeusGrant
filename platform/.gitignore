@@ -22,9 +22,13 @@ node_modules/
 .next/
 out/
 
+# Vercel CLI local project link
+.vercel/
+
 # OS / editor
 .DS_Store
 *.log
 
 # TS incremental build cache
 *.tsbuildinfo
+.vercel

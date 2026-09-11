@@ -4,9 +4,16 @@ version = "0.0.0"
 description = "Zeus Platform monorepo root (uv workspace)"
 requires-python = ">=3.12"
 # The root is a virtual project; real code lives in the workspace members.
+#
+# The adapter extras are pinned here because this is what a deployment installs.
+# The services depend on bare "zeus-adapters" so a self-host can pick its own
+# providers, but that left the concrete drivers to be supplied by whatever
+# invoked them -- docker-compose did, Vercel did not, and the function crashed
+# on a missing asyncpg. Declaring them at the root makes the production
+# provider set explicit and installed by default.
 dependencies = [
     "zeus-config",
-    "zeus-adapters",
+    "zeus-adapters[postgres,redis,stripe,supabase,openai]",
     "zeus-service-kit",
     "zeus-platform-core",
     "zeus-contract-compliance",

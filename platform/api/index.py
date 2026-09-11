@@ -24,6 +24,7 @@ sub-app connects its database on first use rather than at import.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -49,6 +50,9 @@ cc_app = create_cc_app()
 # One-shot startup guard, per warm instance.
 _started = False
 _start_lock = asyncio.Lock()
+#: Last startup failure, surfaced by /api/health instead of crashing the function.
+_startup_error: str | None = None
+logger = logging.getLogger("zeus.entrypoint")
 
 
 @asynccontextmanager
@@ -59,14 +63,26 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
     without this the connection pools are never opened and the first query
     raises "Database pool is not connected". Nothing in the local test suite
     catches it, because there each app is served standalone.
+
+    A failure here is logged rather than raised. Letting it propagate takes the
+    whole function down with an opaque "Serverless Function has crashed" page --
+    including ``/api/health``, the one endpoint whose job is to explain what is
+    wrong. Requests then fail individually, with an attributable error.
     """
-    global _started
-    async with (
-        core_app.router.lifespan_context(core_app),
-        cc_app.router.lifespan_context(cc_app),
-    ):
-        _started = True
-        yield
+    global _started, _startup_error
+    try:
+        async with (
+            core_app.router.lifespan_context(core_app),
+            cc_app.router.lifespan_context(cc_app),
+        ):
+            _started = True
+            _startup_error = None
+            yield
+            return
+    except Exception as exc:  # pragma: no cover - exercised in deployment
+        _startup_error = f"{type(exc).__name__}: {exc}"
+        logger.exception("startup.failed")
+    yield
 
 
 app = FastAPI(
@@ -90,13 +106,21 @@ async def _ensure_started(
     per instance and is a no-op when lifespan already did the work, since
     ``connect()`` returns early if the pool exists.
     """
-    global _started
+    global _started, _startup_error
     if not _started:
         async with _start_lock:
             if not _started:
-                await core_app.state.container.startup()
-                await cc_app.state.container.startup()
-                _started = True
+                try:
+                    await core_app.state.container.startup()
+                    await cc_app.state.container.startup()
+                    _started = True
+                    _startup_error = None
+                except Exception as exc:  # pragma: no cover - deployment only
+                    # Do not cache the failure as "started": a transient database
+                    # blip would otherwise leave this instance permanently
+                    # broken until it is recycled.
+                    _startup_error = f"{type(exc).__name__}: {exc}"
+                    logger.exception("startup.failed")
     return await call_next(request)
 
 
@@ -109,10 +133,12 @@ async def health() -> JSONResponse:
     """
     return JSONResponse(
         {
-            "status": "ok",
+            "status": "ok" if _startup_error is None else "degraded",
+            "startup_error": _startup_error,
             "env": os.getenv("ZEUS_ENV", "unknown"),
             "commit": os.getenv("VERCEL_GIT_COMMIT_SHA", "local")[:7],
-        }
+        },
+        status_code=200 if _startup_error is None else 503,
     )
 
 

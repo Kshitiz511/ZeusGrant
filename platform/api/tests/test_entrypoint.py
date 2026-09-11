@@ -85,5 +85,49 @@ async def test_lifespan_starts_both_sub_apps(monkeypatch):
         assert started == ["core", "cc"]
 
 
+def test_startup_failure_degrades_instead_of_crashing_the_function(monkeypatch):
+    import api.index as entry
+    from fastapi.testclient import TestClient
+
+    async def boom():
+        raise RuntimeError("pool refused")
+
+    monkeypatch.setattr(core_app.state.container, "startup", boom)
+    monkeypatch.setattr(cc_app.state.container, "startup", _noop)
+    monkeypatch.setattr(entry, "_started", False)
+    monkeypatch.setattr(entry, "_startup_error", None)
+
+    # A raised startup error takes the whole function down with an opaque crash
+    # page -- including the endpoint whose job is to explain the failure.
+    res = TestClient(app).get("/api/health")
+    assert res.status_code == 503
+    body = res.json()
+    assert body["status"] == "degraded"
+    assert "pool refused" in body["startup_error"]
+
+
+def test_startup_failure_is_retried_on_the_next_request(monkeypatch):
+    import api.index as entry
+    from fastapi.testclient import TestClient
+
+    attempts: list[int] = []
+
+    async def flaky():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("transient")
+
+    monkeypatch.setattr(core_app.state.container, "startup", flaky)
+    monkeypatch.setattr(cc_app.state.container, "startup", _noop)
+    monkeypatch.setattr(entry, "_started", False)
+    monkeypatch.setattr(entry, "_startup_error", None)
+
+    client = TestClient(app)
+    assert client.get("/api/health").status_code == 503
+    # Caching the failure as "started" would leave the instance permanently
+    # broken after a momentary database blip.
+    assert client.get("/api/health").status_code == 200
+
+
 async def _noop() -> None:
     return None

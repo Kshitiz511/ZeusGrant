@@ -2208,7 +2208,7 @@ name = "zeus-platform"
 version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "zeus-adapters" },
+    { name = "zeus-adapters", extra = ["openai", "postgres", "redis", "stripe", "supabase"] },
     { name = "zeus-config" },
     { name = "zeus-contract-compliance" },
     { name = "zeus-platform-core" },
@@ -2225,7 +2225,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "zeus-adapters", editable = "packages/adapters" },
+    { name = "zeus-adapters", extras = ["postgres", "redis", "stripe", "supabase", "openai"], editable = "packages/adapters" },
     { name = "zeus-config", editable = "packages/config" },
     { name = "zeus-contract-compliance", editable = "services/contract-compliance" },
     { name = "zeus-platform-core", editable = "services/platform-core" },

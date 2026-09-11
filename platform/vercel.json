@@ -4,8 +4,6 @@
   "outputDirectory": "apps/console/dist",
   "functions": {
     "api/index.py": {
-      "runtime": "python@3.12",
-      "memory": 1024,
       "maxDuration": 60
     }
   },
