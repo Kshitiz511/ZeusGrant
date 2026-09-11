@@ -7,7 +7,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { api, ApiError } from "./api";
+import { api, ApiError, asPendingVerification } from "./api";
 import type { SessionResponse } from "./types";
 
 // --- Security model ---------------------------------------------------------
@@ -36,14 +36,34 @@ export type Identity = {
   role: string;
 };
 
+/** An account that exists but has not proved its email address yet. */
+export type PendingUser = { userId: string; email: string };
+
 type AuthState = {
   identity: Identity | null;
+  /**
+   * Set when the account needs its address confirmed -- either just created,
+   * or an existing one that never finished. Both paths land on the same
+   * screen, so there is one place where a code can be entered.
+   */
+  pendingUser: PendingUser | null;
   /** True until the initial refresh attempt settles; render nothing meanwhile. */
   isRestoring: boolean;
   isAuthenticating: boolean;
   error: string | null;
   login: (email: string, password: string) => Promise<void>;
-  signup: (email: string, password: string, workspaceName?: string) => Promise<void>;
+  signup: (
+    email: string,
+    password: string,
+    fullName: string,
+    workspaceName?: string,
+  ) => Promise<void>;
+  /** Submit the emailed code. On success the user is signed in. */
+  verifyEmail: (code: string) => Promise<void>;
+  /** Ask for a fresh code. Resolves to the message worth showing the user. */
+  resendCode: () => Promise<void>;
+  /** Leave the verification screen, e.g. to sign in as somebody else. */
+  cancelVerification: () => void;
   logout: () => Promise<void>;
   getToken: () => string | null;
 };
@@ -53,6 +73,7 @@ const AuthContext = createContext<AuthState | null>(null);
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const tokenRef = useRef<string | null>(null);
   const [identity, setIdentity] = useState<Identity | null>(null);
+  const [pendingUser, setPendingUser] = useState<PendingUser | null>(null);
   const [isRestoring, setRestoring] = useState(true);
   const [isAuthenticating, setAuthenticating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -126,15 +147,63 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback(
     (email: string, password: string) =>
-      run(async () => establish(await api.login(email, password))),
+      run(async () => {
+        try {
+          // Awaited inside the try so a failure to exchange the tenant token
+          // is caught here rather than surfacing as an unhandled rejection.
+          await establish(await api.login(email, password));
+        } catch (e) {
+          // An unverified account is not a failed sign-in, it is an unfinished
+          // one. Send them to the code screen rather than making them guess
+          // what went wrong.
+          const pending = asPendingVerification(e);
+          if (pending) {
+            setPendingUser({ userId: pending.user_id, email: pending.email });
+            await api.resendVerification(pending.user_id).catch(() => {
+              /* rate-limited is fine; their existing code still works */
+            });
+            return;
+          }
+          throw e;
+        }
+      }),
     [run, establish],
   );
 
   const signup = useCallback(
-    (email: string, password: string, workspaceName?: string) =>
-      run(async () => establish(await api.signup(email, password, workspaceName))),
-    [run, establish],
+    (email: string, password: string, fullName: string, workspaceName?: string) =>
+      run(async () => {
+        const pending = await api.signup(email, password, fullName, workspaceName);
+        // No session comes back here by design, so there is nothing to
+        // establish -- only an address waiting to be confirmed.
+        setPendingUser({ userId: pending.user_id, email: pending.email });
+      }),
+    [run],
   );
+
+  const verifyEmail = useCallback(
+    (code: string) =>
+      run(async () => {
+        if (!pendingUser) throw new Error("There is no account waiting to be verified.");
+        await establish(await api.verifyEmail(pendingUser.userId, code));
+        setPendingUser(null);
+      }),
+    [run, establish, pendingUser],
+  );
+
+  const resendCode = useCallback(
+    () =>
+      run(async () => {
+        if (!pendingUser) return;
+        await api.resendVerification(pendingUser.userId);
+      }),
+    [run, pendingUser],
+  );
+
+  const cancelVerification = useCallback(() => {
+    setPendingUser(null);
+    setError(null);
+  }, []);
 
   const logout = useCallback(async () => {
     // Clear locally first so the UI never appears logged in after the click,
@@ -153,15 +222,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<AuthState>(
     () => ({
       identity,
+      pendingUser,
       isRestoring,
       isAuthenticating,
       error,
       login,
       signup,
+      verifyEmail,
+      resendCode,
+      cancelVerification,
       logout,
       getToken,
     }),
-    [identity, isRestoring, isAuthenticating, error, login, signup, logout, getToken],
+    [
+      identity,
+      pendingUser,
+      isRestoring,
+      isAuthenticating,
+      error,
+      login,
+      signup,
+      verifyEmail,
+      resendCode,
+      cancelVerification,
+      logout,
+      getToken,
+    ],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -146,6 +146,26 @@ class BillingProvider(ABC):
         """Verify signature and normalize the event into an EntitlementChange."""
 
 
+class EmailSender(ABC):
+    """Transactional email delivery.
+
+    Deliberately minimal: the platform sends a handful of templated,
+    one-to-one messages (verification codes, receipts). Anything resembling
+    bulk marketing belongs in a separate system with its own consent handling.
+    """
+
+    @abstractmethod
+    async def send(
+        self, *, to: str, subject: str, text: str, html: str | None = None
+    ) -> None:
+        """Deliver one message.
+
+        Raises on failure. Callers decide whether a failure is fatal: a
+        verification code that never arrives must surface to the user, while a
+        receipt can be retried later.
+        """
+
+
 __all__ = [
     "LlmProvider",
     "Cache",
@@ -154,4 +174,5 @@ __all__ = [
     "AuthProvider",
     "Storage",
     "BillingProvider",
+    "EmailSender",
 ]

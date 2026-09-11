@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 import uuid
 
@@ -28,12 +29,28 @@ from zeus_platform_core.services.tenancy_service import TenancyService
 # scrypt parameters: n=2^14, r=8, p=1 (~16 MiB) — interactive-login grade.
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 16384, 8, 1
 
+log = logging.getLogger(__name__)
+
 TRIAL_MODULE = "contract_compliance"
 TRIAL_PLAN = "cc_starter"
 
 
 class AuthError(Exception):
     """Raised for signup/login failures; message is safe to show the user."""
+
+
+class EmailNotVerifiedError(AuthError):
+    """Correct password, but the address was never confirmed.
+
+    Carries the user id so the caller can offer to resend the code. This is not
+    an information leak: the password was already proven correct, so whoever
+    sees it is the account holder.
+    """
+
+    def __init__(self, user_id: str, email: str) -> None:
+        super().__init__("Verify your email address to sign in.")
+        self.user_id = user_id
+        self.email = email
 
 
 def hash_password(password: str) -> str:
@@ -78,23 +95,38 @@ class AuthService:
         self._auth = auth
 
     async def signup(
-        self, *, email: str, password: str, workspace_name: str | None = None
+        self,
+        *,
+        email: str,
+        password: str,
+        full_name: str,
+        workspace_name: str | None = None,
     ) -> dict:
         """Create user + credentials + first tenant + trial; return a session."""
         email = email.strip().lower()
+        full_name = full_name.strip()
         if "@" not in email or "." not in email.rsplit("@", 1)[-1] or len(email) < 6:
             raise AuthError("Enter a valid email address.")
+        if len(full_name) < 2:
+            raise AuthError("Enter your full name.")
+        if len(full_name) > 120:
+            raise AuthError("That name is too long.")
         if len(password) < 8:
             raise AuthError("Password must be at least 8 characters.")
         if await self._tenants.get_user_by_email(email) is not None:
             raise AuthError("An account with this email already exists.")
 
         user_id = str(uuid.uuid4())
-        await self._tenants.upsert_user(user_id, email, provider="platform")
+        await self._tenants.upsert_user(user_id, email, provider="platform", full_name=full_name)
         await self._tenants.set_password_hash(user_id, hash_password(password))
 
+        # Default the workspace to the person's name when they do not supply
+        # one. "Ada Lovelace's Workspace" is a better empty state than a blank
+        # field or a generic placeholder.
         tenant = await self._tenancy.provision_tenant(
-            user_id=user_id, email=email, tenant_name=workspace_name
+            user_id=user_id,
+            email=email,
+            tenant_name=workspace_name or f"{full_name.split()[0]}'s Workspace",
         )
 
         # Start a Contract Compliance trial so the console isn't an empty shell.
@@ -117,7 +149,94 @@ class AuthService:
         ok = verify_password(password, stored) if stored else False
         if not user or not ok:
             raise AuthError("Invalid email or password.")
+
+        # Checked only after the password is confirmed. Reporting "unverified"
+        # to someone who got the password wrong would tell an attacker which
+        # addresses are registered.
+        if user.get("email_verified_at") is None:
+            raise EmailNotVerifiedError(str(user["id"]), email)
+
         return await self._session_payload(str(user["id"]), email)
+
+    async def signin_with_google(
+        self, *, subject: str, email: str, email_verified: bool, full_name: str | None
+    ) -> dict:
+        """Sign in (or register) a user via a verified Google identity.
+
+        Google must have verified the address itself. An unverified Google
+        account proves only that someone typed an address into Google, which is
+        exactly the assurance we are trying to obtain.
+        """
+        if not email_verified:
+            raise AuthError(
+                "Your Google account's email is not verified. Verify it with Google first."
+            )
+
+        email = email.strip().lower()
+
+        # 1. Known Google identity -> straight in. Matched on subject, so this
+        #    keeps working even if the user changed their Gmail address.
+        existing = await self._tenants.get_user_by_identity("google", subject)
+        if existing is not None:
+            await self._tenants.link_identity(
+                user_id=str(existing["id"]), provider="google", subject=subject, email=email
+            )
+            return await self._session_payload(str(existing["id"]), str(existing["email"]))
+
+        # 2. An account already uses this address, created with a password.
+        by_email = await self._tenants.get_user_by_email(email)
+        if by_email is not None:
+            user_id = str(by_email["id"])
+            if by_email.get("email_verified_at") is None:
+                # The dangerous case, and the reason this branch exists.
+                #
+                # Anyone can sign up with someone else's address today, because
+                # signup does not verify it. If we simply attached Google to
+                # that account, the real owner would sign in with Google and
+                # land inside an account the impostor still holds the password
+                # to -- a silent, permanent account takeover.
+                #
+                # Google's proof of ownership beats an unproven password, so the
+                # account is handed to the verified party and the password is
+                # revoked. The impostor is locked out; the owner keeps the data.
+                await self._tenants.clear_password_hash(user_id)
+                log.warning(
+                    "auth.google_claimed_unverified_account user_id=%s", user_id
+                )
+            await self._tenants.upsert_user(
+                user_id, email, provider="platform", full_name=full_name
+            )
+            await self._tenants.mark_email_verified(user_id)
+            await self._tenants.link_identity(
+                user_id=user_id, provider="google", subject=subject, email=email
+            )
+            return await self._session_payload(user_id, email)
+
+        # 3. Brand new user. Google has already verified the address, so this
+        #    account starts verified and skips the email code entirely.
+        user_id = str(uuid.uuid4())
+        await self._tenants.upsert_user(
+            user_id, email, provider="google", full_name=full_name
+        )
+        await self._tenants.mark_email_verified(user_id)
+        await self._tenants.link_identity(
+            user_id=user_id, provider="google", subject=subject, email=email
+        )
+
+        first_name = (full_name or email.split("@")[0]).split()[0]
+        tenant = await self._tenancy.provision_tenant(
+            user_id=user_id, email=email, tenant_name=f"{first_name}'s Workspace"
+        )
+        await self._subscriptions.upsert(
+            tenant_id=tenant.id,
+            module_id=TRIAL_MODULE,
+            plan_id=TRIAL_PLAN,
+            status=SubscriptionStatus.trialing,
+            stripe_subscription_id=None,
+        )
+        await self._entitlements.refresh(tenant.id)
+
+        return await self._session_payload(user_id, email)
 
     async def session_for_user(self, user_id: str) -> dict:
         """Mint a session payload for an already-authenticated user.

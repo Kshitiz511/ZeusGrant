@@ -91,6 +91,23 @@ class AuthSettings(_Base):
     )
     supabase_jwt_secret: SecretStr | None = Field(default=None, alias="ZEUS_SUPABASE_JWT_SECRET")
 
+    # --- Google Sign-In ------------------------------------------------------
+    # All three must be present for the button to appear. Half-configured OAuth
+    # fails at the redirect with an opaque Google error page, so the console
+    # asks the server whether it is configured rather than guessing.
+    google_client_id: str | None = Field(default=None, alias="ZEUS_GOOGLE_CLIENT_ID")
+    google_client_secret: SecretStr | None = Field(
+        default=None, alias="ZEUS_GOOGLE_CLIENT_SECRET"
+    )
+    #: Must match a redirect URI registered in the Google Cloud console exactly.
+    google_redirect_uri: str | None = Field(default=None, alias="ZEUS_GOOGLE_REDIRECT_URI")
+
+    @property
+    def google_configured(self) -> bool:
+        return bool(
+            self.google_client_id and self.google_client_secret and self.google_redirect_uri
+        )
+
 
 class SessionSettings(_Base):
     """Refresh-token cookie policy.
@@ -150,6 +167,20 @@ class BillingSettings(_Base):
     )
 
 
+class EmailSettings(_Base):
+    # console = log only (dev); resend = real delivery.
+    provider: str = Field(default="console", alias="ZEUS_EMAIL_PROVIDER")
+    resend_api_key: SecretStr | None = Field(default=None, alias="ZEUS_RESEND_API_KEY")
+    # Must be on a domain verified with the provider, or every send is rejected.
+    from_address: str = Field(
+        default="Zeus <onboarding@resend.dev>", alias="ZEUS_EMAIL_FROM"
+    )
+    # How long a verification code stays valid.
+    verification_ttl_minutes: int = Field(
+        default=15, alias="ZEUS_EMAIL_VERIFICATION_TTL_MINUTES"
+    )
+
+
 class ObservabilitySettings(_Base):
     otel_enabled: bool = Field(default=False, alias="ZEUS_OTEL_ENABLED")
     otel_endpoint: str | None = Field(default=None, alias="ZEUS_OTEL_EXPORTER_OTLP_ENDPOINT")
@@ -176,6 +207,7 @@ class Settings(_Base):
     session: SessionSettings = Field(default_factory=SessionSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     billing: BillingSettings = Field(default_factory=BillingSettings)
+    email: EmailSettings = Field(default_factory=EmailSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
 
     @property
@@ -232,6 +264,23 @@ class Settings(_Base):
         if missing:
             raise ValueError(
                 "Missing required production configuration: " + ", ".join(missing)
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _forbid_console_email_in_production(self) -> Settings:
+        """Refuse to start production with the logging-only email transport.
+
+        The console sender discards the message. In production that means every
+        verification code is silently dropped, and because sign-in is gated on
+        verification, no new user could ever reach their account. The failure
+        would look like a broken signup form rather than a misconfiguration.
+        """
+        if self.is_production and self.email.provider.lower() == "console":
+            raise ValueError(
+                "ZEUS_EMAIL_PROVIDER must not be 'console' when ZEUS_ENV=production. "
+                "The console transport only logs messages, so verification codes "
+                "would never be delivered and no new user could sign in."
             )
         return self
 

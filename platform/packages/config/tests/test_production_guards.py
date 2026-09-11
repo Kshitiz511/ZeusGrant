@@ -24,19 +24,28 @@ _RELEVANT = (
     "ZEUS_SUPABASE_JWT_SECRET",
     "ZEUS_SECRETS_ENCRYPTION_KEY",
     "ZEUS_SESSION_COOKIE_SECURE",
+    "ZEUS_EMAIL_PROVIDER",
 )
 
 
 @pytest.fixture
-def env(monkeypatch):
+def env(monkeypatch, tmp_path):
     """Return a builder that loads Settings from a controlled environment."""
     for name in _RELEVANT:
         monkeypatch.delenv(name, raising=False)
 
+    # Every settings group inherits ``env_file=".env"``, which pydantic
+    # resolves relative to the working directory. Passing ``_env_file=None``
+    # only disables it on the outer object -- the nested groups construct
+    # themselves and read the file anyway. Running from an empty directory is
+    # what actually keeps a developer's local .env out of these assertions,
+    # and without it these tests pass or fail depending on whose machine they
+    # run on.
+    monkeypatch.chdir(tmp_path)
+
     def apply(**values: str) -> Settings:
         for key, value in values.items():
             monkeypatch.setenv(key, value)
-        # _env_file=None so a developer's local .env cannot reintroduce secrets.
         return Settings(_env_file=None)
 
     return apply
@@ -83,11 +92,28 @@ def test_fully_configured_production_starts(env):
         ZEUS_ENV="production",
         ZEUS_SUPABASE_JWT_SECRET="a-real-secret",
         ZEUS_SECRETS_ENCRYPTION_KEY="a-real-key",
+        ZEUS_EMAIL_PROVIDER="resend",
     )
     assert settings.is_production
     assert settings.env is Environment.production
     # Defaults to off, and the validator above proves it cannot be turned on.
     assert not settings.dev_tokens_enabled
+
+
+def test_production_refuses_the_console_email_transport(env):
+    """The logging-only sender must never reach production.
+
+    It discards the message. Because sign-in is gated on email verification,
+    shipping it would mean no new user could ever reach their account -- and it
+    would look like a broken signup form, not a misconfiguration.
+    """
+    with pytest.raises(ValidationError, match="ZEUS_EMAIL_PROVIDER"):
+        env(
+            ZEUS_ENV="production",
+            ZEUS_SUPABASE_JWT_SECRET="a-real-secret",
+            ZEUS_SECRETS_ENCRYPTION_KEY="a-real-key",
+            ZEUS_EMAIL_PROVIDER="console",
+        )
 
 
 def test_development_does_not_require_production_secrets(env):
@@ -116,5 +142,6 @@ def test_production_forces_secure_session_cookies(env):
         ZEUS_SESSION_COOKIE_SECURE="false",
         ZEUS_SUPABASE_JWT_SECRET="a-real-secret",
         ZEUS_SECRETS_ENCRYPTION_KEY="a" * 32,
+        ZEUS_EMAIL_PROVIDER="resend",
     )
     assert settings.session.cookie_secure is True

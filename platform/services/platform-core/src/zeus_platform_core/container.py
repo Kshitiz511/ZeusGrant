@@ -12,7 +12,7 @@ import logging
 import os
 import time
 from functools import cached_property
-from typing import get_args
+from typing import TYPE_CHECKING, get_args
 
 from pydantic import SecretStr
 from zeus_adapters import (
@@ -21,8 +21,23 @@ from zeus_adapters import (
     build_cache,
     build_database,
 )
-from zeus_adapters.interfaces import AuthProvider, BillingProvider, Cache, Database
+from zeus_adapters.interfaces import (
+    AuthProvider,
+    BillingProvider,
+    Cache,
+    Database,
+    EmailSender,
+)
 from zeus_config import SecretBox, Settings, get_settings
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # Imported lazily at runtime so a deployment without Google configured does
+    # not pay for the import, and a missing optional dependency cannot break
+    # startup for everyone else.
+    from zeus_platform_core.services.email_verification_service import (
+        EmailVerificationService,
+    )
+    from zeus_platform_core.services.google_oauth import GoogleOAuthService
 
 from zeus_platform_core.repositories.billing import (
     BillingEventRepository,
@@ -97,12 +112,14 @@ class Container:
         cache: Cache | None = None,
         auth: AuthProvider | None = None,
         billing_provider: BillingProvider | None = None,
+        email: EmailSender | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self._db_override = db
         self._cache_override = cache
         self._auth_override = auth
         self._billing_provider_override = billing_provider
+        self._email_override = email
         # Settings with admin-dashboard overrides applied. Starts as the plain
         # environment view so the app is usable before the database is reachable.
         self._effective: Settings = self.settings
@@ -218,6 +235,46 @@ class Container:
             subscriptions=self.subscriptions,
             entitlements=self.entitlements,
             auth=self.auth,
+        )
+
+    @cached_property
+    def google_oauth(self) -> GoogleOAuthService:
+        """Google Sign-In client.
+
+        Constructed lazily and only when configured; the router checks
+        ``google_configured`` before touching this, so the assertion here is a
+        guard against a future caller forgetting to.
+        """
+        from zeus_platform_core.services.google_oauth import GoogleOAuthService
+
+        cfg = self.settings.auth
+        if not cfg.google_configured:
+            raise RuntimeError("Google sign-in is not configured.")
+        return GoogleOAuthService(
+            client_id=cfg.google_client_id or "",
+            client_secret=(
+                cfg.google_client_secret.get_secret_value() if cfg.google_client_secret else ""
+            ),
+            redirect_uri=cfg.google_redirect_uri or "",
+            cache=self.cache,
+        )
+
+    @cached_property
+    def email_sender(self) -> EmailSender:
+        from zeus_adapters.email import build_email_sender
+
+        return self._email_override or build_email_sender(self.settings)
+
+    @cached_property
+    def email_verification(self) -> EmailVerificationService:
+        from zeus_platform_core.services.email_verification_service import (
+            EmailVerificationService,
+        )
+
+        return EmailVerificationService(
+            tenants=self.tenants,
+            email=self.email_sender,
+            ttl_minutes=self.settings.email.verification_ttl_minutes,
         )
 
     @cached_property

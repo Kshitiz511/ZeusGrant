@@ -46,6 +46,13 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    /**
+     * The parsed `detail` field, when the server sent an object rather than a
+     * string. Some failures are not dead ends -- "verify your email" carries
+     * the user id the next screen needs -- so the caller gets the structure
+     * back instead of only a sentence to print.
+     */
+    public detail?: unknown,
   ) {
     super(message);
     this.name = "ApiError";
@@ -70,16 +77,21 @@ async function request<T>(
 
   const res = await fetch(url, { ...opts, headers });
   if (!res.ok) {
-    let detail = res.statusText;
+    let message = res.statusText;
+    let raw: unknown;
     try {
       const body = await res.json();
-      const raw = (body as { detail?: unknown }).detail;
-      // FastAPI validation errors arrive as an array of issue objects.
-      detail = typeof raw === "string" ? raw : summarizeDetail(raw) ?? JSON.stringify(body);
+      raw = (body as { detail?: unknown }).detail;
+      // FastAPI validation errors arrive as an array of issue objects. Errors
+      // we raise ourselves may be an object with a machine-readable status.
+      message =
+        typeof raw === "string"
+          ? raw
+          : summarizeDetail(raw) ?? messageFromDetail(raw) ?? JSON.stringify(body);
     } catch {
       /* fall back to statusText */
     }
-    throw new ApiError(res.status, detail);
+    throw new ApiError(res.status, message, raw);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -93,13 +105,70 @@ function summarizeDetail(raw: unknown): string | null {
   return messages.length > 0 ? messages.join("; ") : null;
 }
 
+function messageFromDetail(raw: unknown): string | null {
+  if (raw && typeof raw === "object") {
+    const message = (raw as { message?: unknown }).message;
+    if (typeof message === "string") return message;
+  }
+  return null;
+}
+
+/** Signup no longer returns a session; the address has to be proved first. */
+export type PendingVerification = {
+  status: "verification_required";
+  user_id: string;
+  email: string;
+};
+
+/** True when a failure is really "finish verifying", not a dead end. */
+export function asPendingVerification(error: unknown): PendingVerification | null {
+  if (!(error instanceof ApiError)) return null;
+  const detail = error.detail;
+  if (detail && typeof detail === "object") {
+    const d = detail as Partial<PendingVerification>;
+    if (d.status === "verification_required" && d.user_id && d.email) {
+      return { status: "verification_required", user_id: d.user_id, email: d.email };
+    }
+  }
+  return null;
+}
+
 export const api = {
   // --- auth ---
-  signup: (email: string, password: string, workspaceName?: string) =>
-    request<SessionResponse>(`${CORE}/auth/signup`, {
+  signup: (email: string, password: string, fullName: string, workspaceName?: string) =>
+    request<PendingVerification>(`${CORE}/auth/signup`, {
       method: "POST",
-      body: JSON.stringify({ email, password, workspace_name: workspaceName || undefined }),
+      body: JSON.stringify({
+        email,
+        password,
+        full_name: fullName,
+        workspace_name: workspaceName || undefined,
+      }),
     }),
+
+  /** Submit the emailed code. This is where the first session is issued. */
+  verifyEmail: (userId: string, code: string) =>
+    request<SessionResponse>(`${CORE}/auth/verify`, {
+      method: "POST",
+      body: JSON.stringify({ user_id: userId, code }),
+    }),
+
+  /** Send a fresh code. The server retires the previous one and rate-limits. */
+  resendVerification: (userId: string) =>
+    request<{ status: string }>(`${CORE}/auth/verify/resend`, {
+      method: "POST",
+      body: JSON.stringify({ user_id: userId }),
+    }),
+
+  /**
+   * Which sign-in methods this deployment can actually offer.
+   *
+   * Google is configured by environment variable, so the button must be driven
+   * by the server rather than hardcoded. Rendering it where no client ID is
+   * set would send users to a Google error page.
+   */
+  authMethods: () =>
+    request<{ password: boolean; google: boolean }>(`${CORE}/auth/methods`, { method: "GET" }),
 
   login: (email: string, password: string) =>
     request<SessionResponse>(`${CORE}/auth/login`, {

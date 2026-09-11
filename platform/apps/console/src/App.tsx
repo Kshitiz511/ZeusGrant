@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Loader2, ShieldCheck } from "lucide-react";
 import { ActivityView } from "@/components/ActivityView";
 import { AppShell } from "@/components/AppShell";
@@ -6,11 +6,15 @@ import { BillingView } from "@/components/BillingView";
 import { ContractDetail } from "@/components/ContractDetail";
 import { ContractsView } from "@/components/ContractsView";
 import { LoginView } from "@/components/LoginView";
+import { SignupView } from "@/components/SignupView";
+import { LandingPage } from "@/components/site/LandingPage";
 import { TasksView } from "@/components/TasksView";
 import { Button } from "@/components/ui/button";
+import { VerifyEmailView } from "@/components/VerifyEmailView";
 import { useAuth } from "@/lib/auth";
 import { useContracts, useModuleAccess } from "@/lib/hooks";
 import { MODULES } from "@/lib/modules";
+import { useRoute } from "@/lib/router";
 import type { Contract } from "@/lib/types";
 
 type View =
@@ -42,13 +46,36 @@ const ROUTE_META: Record<string, { title: string; description?: string }> = {
 };
 
 export default function App() {
-  const { identity, isRestoring } = useAuth();
+  const { identity, pendingUser, isRestoring } = useAuth();
+  const [path, navigate] = useRoute();
   const [view, setView] = useState<View>({ kind: "route", key: "/compliance" });
+
+  // A signed-in user sitting on a public URL has just finished logging in.
+  // Rewriting the address stops the back button from returning them to a login
+  // form they no longer need. This runs as an effect, not during render, and
+  // sits above the early returns so the hook order never changes.
+  const onPublicPath = path === "/" || path === "/login" || path === "/signup";
+  useEffect(() => {
+    if (identity && onPublicPath) navigate("/app", { replace: true });
+  }, [identity, onPublicPath, navigate]);
 
   // The session cookie is checked before first paint. Showing the login form
   // during that round-trip would flash it at users who are already signed in.
   if (isRestoring) return <Restoring />;
-  if (!identity) return <LoginView />;
+
+  if (!identity) {
+    // Takes precedence over the login and signup forms: the account already
+    // exists, and sending them back to a form they just completed would look
+    // like the signup failed.
+    if (pendingUser) return <VerifyEmailView />;
+    if (path === "/login") return <LoginView navigate={navigate} />;
+    if (path === "/signup") return <SignupView navigate={navigate} />;
+    // Anything else, including deep links into the console, lands on the
+    // marketing page rather than a 404. The deep link is lost, but a stranger
+    // seeing the product beats a stranger seeing an error.
+    return <LandingPage onNavigate={navigate} />;
+  }
+
   return <Authed view={view} setView={setView} />;
 }
 
