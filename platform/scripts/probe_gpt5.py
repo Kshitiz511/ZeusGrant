@@ -41,7 +41,10 @@ async def main() -> None:
     u = resp.usage
     print("MODEL:", resp.model)
     print("TEXT:", (resp.choices[0].message.content or "").strip())
-    print(f"TOKENS: prompt={u.prompt_tokens} completion={u.completion_tokens} total={u.total_tokens}")
+    print(
+        f"TOKENS: prompt={u.prompt_tokens} completion={u.completion_tokens} "
+        f"total={u.total_tokens}"
+    )
 
 
 if __name__ == "__main__":
