@@ -70,16 +70,26 @@ jobs:
       - name: Smoke test
         # A green build is not a working deployment. This is the minimum proof
         # that the function actually boots and its dependencies resolve.
+        #
+        # Probes the production alias, not the unique deployment URL: the
+        # latter sits behind Vercel Deployment Protection and answers 302 to an
+        # SSO redirect regardless of application health, which fails every time
+        # and triggers a rollback of a perfectly good deploy. The alias is also
+        # what users actually reach, so it is the honest thing to verify.
+        #
+        # Asserts on the commit too. A 200 alone can come from the *previous*
+        # deployment if the alias has not moved yet, which would report success
+        # while the new code is nowhere in production.
         run: |
           set -euo pipefail
-          url="${{ steps.deploy.outputs.url }}"
+          url="https://zeus-platform-dun.vercel.app"
           for attempt in 1 2 3 4 5; do
             code=$(curl -s -o /tmp/health.json -w '%{http_code}' "$url/api/health" || true)
-            if [ "$code" = "200" ]; then
+            if [ "$code" = "200" ] && grep -q "${GITHUB_SHA:0:7}" /tmp/health.json; then
               cat /tmp/health.json
               exit 0
             fi
-            echo "attempt $attempt: HTTP $code"
+            echo "attempt $attempt: HTTP $code (want 200 serving ${GITHUB_SHA:0:7})"
             cat /tmp/health.json 2>/dev/null || true
             sleep 5
           done
