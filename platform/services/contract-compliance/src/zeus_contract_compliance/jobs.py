@@ -70,8 +70,43 @@ async def run_analyze_job(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Contract not found."
             )
 
-        drafts = await container.extraction.extract(contract.body or "")
+        # Same semantics as the synchronous route: untouched AI obligations are
+        # replaced, manual and in-progress ones survive.
+        removed = await container.obligations.delete_ai_for_contract(
+            job.tenant_id, job.contract_id
+        )
+
+        drafts = await container.extraction.extract_detailed(contract.body or "")
         created = await container.obligations.bulk_insert_ai(
-            tenant_id=job.tenant_id, contract_id=job.contract_id, drafts=drafts
+            tenant_id=job.tenant_id, contract_id=job.contract_id, drafts=drafts.obligations
+        )
+        await container.contracts.mark_analyzed(job.tenant_id, job.contract_id)
+        await container.ai_usage.record(
+            tenant_id=job.tenant_id,
+            contract_id=job.contract_id,
+            actor_id=None,
+            operation="extract_obligations",
+            model=drafts.model,
+            chunks=drafts.chunks,
+            chunks_failed=drafts.chunks_failed,
+            estimated_input_tokens=drafts.estimated_input_tokens,
+            obligations_found=created,
+            obligations_dropped=drafts.dropped,
+            latency_ms=drafts.latency_ms,
+        )
+        await container.audit.record(
+            tenant_id=job.tenant_id,
+            actor_id=None,  # queue-driven, so there is no interactive user
+            action="contract.analyzed",
+            entity_type="contract",
+            entity_id=job.contract_id,
+            detail={
+                "obligations_created": created,
+                "stale_removed": removed,
+                "model": drafts.model,
+                "chunks": drafts.chunks,
+                "chunks_failed": drafts.chunks_failed,
+                "via": "queue",
+            },
         )
     return JobResult(contract_id=job.contract_id, obligations_created=created)

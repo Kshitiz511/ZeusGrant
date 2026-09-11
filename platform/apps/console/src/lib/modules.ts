@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import { Archive, Brain, ListChecks, ShieldCheck } from "lucide-react";
+import { Archive, Brain, History, ListChecks, ShieldCheck } from "lucide-react";
 
 // Mirrors the legacy app's module catalog + nav, trimmed to what the console
 // currently surfaces. Each module groups its nav items in the sidebar; a module
@@ -32,6 +32,7 @@ export const MODULES: ModuleMeta[] = [
     nav: [
       { to: "/compliance", label: "Contract Compliance", icon: ShieldCheck },
       { to: "/my-tasks", label: "My Tasks", icon: ListChecks },
+      { to: "/activity", label: "Activity", icon: History },
     ],
   },
   {

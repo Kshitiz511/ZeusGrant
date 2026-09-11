@@ -9,6 +9,7 @@ from __future__ import annotations
 from zeus_config import Settings
 
 from zeus_adapters.interfaces import LlmProvider
+from zeus_adapters.llm.resilient import ResilientLlmProvider
 
 
 def _key(secret) -> str | None:
@@ -16,6 +17,24 @@ def _key(secret) -> str | None:
 
 
 def build_llm_provider(settings: Settings) -> LlmProvider:
+    """Build the configured provider, wrapped in retries and a circuit breaker.
+
+    Wrapping happens here rather than at each call site so no service can
+    accidentally talk to a raw provider.
+    """
+    inner = _build_inner(settings)
+    llm = settings.llm
+    return ResilientLlmProvider(
+        inner,
+        max_attempts=llm.max_attempts,
+        base_delay=llm.retry_base_delay,
+        max_delay=llm.retry_max_delay,
+        failure_threshold=llm.breaker_failure_threshold,
+        recovery_seconds=llm.breaker_recovery_seconds,
+    )
+
+
+def _build_inner(settings: Settings) -> LlmProvider:
     llm = settings.llm
     provider = llm.provider.lower()
 

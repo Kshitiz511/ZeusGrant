@@ -22,6 +22,12 @@ class SupabaseStorage(Storage):
         )
         return key
 
+    async def get(self, bucket: str, key: str) -> bytes:
+        try:
+            return bytes(self._client.storage.from_(bucket).download(key))
+        except Exception as exc:  # supabase raises provider-specific errors
+            raise FileNotFoundError(f"Object not found: {bucket}/{key}") from exc
+
     async def signed_url(self, bucket: str, key: str, *, ttl_seconds: int = 3600) -> str:
         res = self._client.storage.from_(bucket).create_signed_url(key, ttl_seconds)
         return res["signedURL"]

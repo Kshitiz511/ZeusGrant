@@ -10,6 +10,10 @@ dependencies = [
     "fastapi>=0.115",
     "pydantic>=2.8",
     "uvicorn[standard]>=0.30",
+    # Document ingestion: multipart parsing + pure-python text extraction.
+    "python-multipart>=0.0.9",
+    "pypdf>=5.1",
+    "python-docx>=1.1",
 ]
 
 [project.scripts]

@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 from zeus_adapters.interfaces import LlmProvider
+from zeus_adapters.llm.json_parsing import parse_json_object
 from zeus_adapters.models import Completion, Message
 
 
@@ -74,7 +75,7 @@ class OpenAiProvider(LlmProvider):
             response_format={"type": "json_object"},
             **kwargs,
         )
-        return json.loads(resp.choices[0].message.content or "{}")
+        return parse_json_object(resp.choices[0].message.content or "")
 
     async def embed(self, text: str) -> list[float]:
         resp = await self._client.embeddings.create(

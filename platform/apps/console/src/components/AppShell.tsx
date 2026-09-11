@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ChevronRight, LogOut, Lock, Settings } from "lucide-react";
+import { ChevronRight, CreditCard, LogOut, Lock, Settings } from "lucide-react";
 import { Logo } from "@/components/brand/Logo";
 import { useAuth } from "@/lib/auth";
 import { useModuleAccess } from "@/lib/hooks";
@@ -97,6 +97,7 @@ export function AppShell({
           )}
 
           <div className="border-t border-sidebar-border pt-4">
+            {navButton("/billing", "Plans & Billing", CreditCard, active === "/billing")}
             {navButton("/settings", "Settings", Settings, active === "/settings")}
           </div>
         </nav>
@@ -116,7 +117,7 @@ export function AppShell({
               </p>
             </div>
             <button
-              onClick={logout}
+              onClick={() => void logout()}
               title="Sign out"
               className="rounded-md p-1.5 text-sidebar-foreground/50 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
             >
@@ -131,7 +132,7 @@ export function AppShell({
         <div className="flex items-center justify-between border-b border-sidebar-border bg-sidebar px-4 py-3 lg:hidden">
           <Logo tone="light" />
           <button
-            onClick={logout}
+            onClick={() => void logout()}
             title="Sign out"
             className="rounded-md p-2 text-sidebar-foreground/60 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
           >

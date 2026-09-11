@@ -110,6 +110,14 @@ class Storage(ABC):
     async def put(self, bucket: str, key: str, data: bytes, *, content_type: str) -> str: ...
 
     @abstractmethod
+    async def get(self, bucket: str, key: str) -> bytes:
+        """Return the object's bytes. Raises FileNotFoundError if absent.
+
+        Services stream downloads through their own authenticated routes rather
+        than handing out public URLs, so this is the primary read path.
+        """
+
+    @abstractmethod
     async def signed_url(self, bucket: str, key: str, *, ttl_seconds: int = 3600) -> str: ...
 
     @abstractmethod

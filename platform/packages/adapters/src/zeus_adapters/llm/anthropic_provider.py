@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from zeus_adapters.interfaces import LlmProvider
+from zeus_adapters.llm.json_parsing import parse_json_object
 from zeus_adapters.models import Completion, Message, Role
 
 
@@ -67,7 +68,7 @@ class AnthropicProvider(LlmProvider):
             max_tokens=4096,
         )
         raw = "".join(block.text for block in resp.content if block.type == "text")
-        return json.loads(raw or "{}")
+        return parse_json_object(raw or "")
 
     async def embed(self, text: str) -> list[float]:
         raise NotImplementedError(

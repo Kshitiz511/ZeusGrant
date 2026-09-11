@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from zeus_adapters.interfaces import LlmProvider
+from zeus_adapters.llm.json_parsing import parse_json_object
 from zeus_adapters.models import Completion, Message, Role
 
 
@@ -53,7 +54,7 @@ class GeminiProvider(LlmProvider):
                 "response_mime_type": "application/json",
             },
         )
-        return json.loads(resp.text or "{}")
+        return parse_json_object(resp.text or "")
 
     async def embed(self, text: str) -> list[float]:
         resp = await self._client.aio.models.embed_content(

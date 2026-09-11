@@ -37,6 +37,11 @@ class TenantRepository:
             "SELECT id, email FROM platform.users WHERE lower(email) = lower($1)", email
         )
 
+    async def get_user_by_id(self, user_id: str) -> dict | None:
+        return await self._db.fetch_one(
+            "SELECT id, email FROM platform.users WHERE id = $1", user_id
+        )
+
     async def set_password_hash(self, user_id: str, password_hash: str) -> None:
         await self._db.execute(
             """

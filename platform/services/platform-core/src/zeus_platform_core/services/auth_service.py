@@ -119,6 +119,19 @@ class AuthService:
             raise AuthError("Invalid email or password.")
         return await self._session_payload(str(user["id"]), email)
 
+    async def session_for_user(self, user_id: str) -> dict:
+        """Mint a session payload for an already-authenticated user.
+
+        Used by the refresh endpoint, where the refresh cookie has already
+        proven identity so there is no password to check. The email is re-read
+        from the database rather than carried in the cookie so an address
+        change takes effect on the next refresh.
+        """
+        user = await self._tenants.get_user_by_id(user_id)
+        if user is None:
+            raise AuthError("Account no longer exists.")
+        return await self._session_payload(user_id, str(user["email"]))
+
     async def _session_payload(self, user_id: str, email: str) -> dict:
         tenants = await self._tenants.list_user_tenants(user_id)
         # User-level token: no tenant claim; the console exchanges it for a

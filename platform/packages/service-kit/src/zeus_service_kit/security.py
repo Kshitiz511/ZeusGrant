@@ -111,6 +111,19 @@ async def get_tenant_id(
 TenantIdDep = Annotated[str, Depends(get_tenant_id)]
 
 
+async def get_actor_id(session: SessionDep) -> str | None:
+    """The authenticated user id, for audit attribution.
+
+    Separate from the tenant guard so audit writes never influence access
+    control, and so a missing user id degrades to an anonymous-but-recorded
+    entry rather than failing the request.
+    """
+    return session.user_id or None
+
+
+ActorDep = Annotated[str | None, Depends(get_actor_id)]
+
+
 def require_module(module_id: str):
     """Dependency factory guarding a route to tenants entitled to ``module_id``."""
 

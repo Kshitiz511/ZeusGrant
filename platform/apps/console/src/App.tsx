@@ -1,18 +1,24 @@
 import { useState } from "react";
-import { ShieldCheck } from "lucide-react";
+import { Loader2, ShieldCheck } from "lucide-react";
+import { ActivityView } from "@/components/ActivityView";
 import { AppShell } from "@/components/AppShell";
+import { BillingView } from "@/components/BillingView";
 import { ContractDetail } from "@/components/ContractDetail";
 import { ContractsView } from "@/components/ContractsView";
 import { LoginView } from "@/components/LoginView";
+import { TasksView } from "@/components/TasksView";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth";
-import { useModuleAccess } from "@/lib/hooks";
+import { useContracts, useModuleAccess } from "@/lib/hooks";
 import { MODULES } from "@/lib/modules";
 import type { Contract } from "@/lib/types";
 
 type View =
   | { kind: "route"; key: string }
-  | { kind: "contract"; contract: Contract };
+  // Stored by id, not by value: uploading a document rewrites the contract
+  // body, so the detail view must read the refreshed record from the cache
+  // rather than a snapshot taken at click time.
+  | { kind: "contract"; contractId: string };
 
 const ROUTE_META: Record<string, { title: string; description?: string }> = {
   "/compliance": {
@@ -20,26 +26,58 @@ const ROUTE_META: Record<string, { title: string; description?: string }> = {
     description:
       "Upload contracts and let AI extract every obligation, deadline and financial term.",
   },
-  "/my-tasks": { title: "My Tasks", description: "Obligations assigned to you across contracts." },
+  "/my-tasks": {
+    title: "My Tasks",
+    description: "Every obligation across your contracts, in one queue.",
+  },
+  "/activity": {
+    title: "Activity",
+    description: "An append-only record of everything your team has done here.",
+  },
+  "/billing": {
+    title: "Plans & Billing",
+    description: "Choose a plan for each module, or manage your existing subscription.",
+  },
   "/settings": { title: "Settings", description: "Workspace, security and billing preferences." },
 };
 
 export default function App() {
-  const { identity } = useAuth();
+  const { identity, isRestoring } = useAuth();
   const [view, setView] = useState<View>({ kind: "route", key: "/compliance" });
 
+  // The session cookie is checked before first paint. Showing the login form
+  // during that round-trip would flash it at users who are already signed in.
+  if (isRestoring) return <Restoring />;
   if (!identity) return <LoginView />;
   return <Authed view={view} setView={setView} />;
 }
 
+function Restoring() {
+  return (
+    <div className="flex min-h-screen items-center justify-center">
+      <Loader2 className="size-6 animate-spin text-muted-foreground" />
+      <span className="sr-only">Restoring your session</span>
+    </div>
+  );
+}
+
 function Authed({ view, setView }: { view: View; setView: (v: View) => void }) {
   const { hasAccess, isLoading } = useModuleAccess();
+  const { data: contracts } = useContracts();
 
   const navigate = (key: string) => setView({ kind: "route", key });
+  const openContract =
+    view.kind === "contract"
+      ? contracts?.find((c) => c.id === view.contractId) ?? null
+      : null;
+
   const activeKey = view.kind === "contract" ? "/compliance" : view.key;
   const meta =
     view.kind === "contract"
-      ? { title: view.contract.title, description: view.contract.counterparty || undefined }
+      ? {
+          title: openContract?.title ?? "Contract",
+          description: openContract?.counterparty || undefined,
+        }
       : ROUTE_META[view.key] ?? moduleMeta(view.key);
 
   return (
@@ -50,21 +88,39 @@ function Authed({ view, setView }: { view: View; setView: (v: View) => void }) {
       onNavigate={navigate}
     >
       {view.kind === "contract" ? (
-        <ContractDetail
-          contract={view.contract}
-          onBack={() => setView({ kind: "route", key: "/compliance" })}
-        />
+        openContract ? (
+          <ContractDetail
+            contract={openContract}
+            onBack={() => setView({ kind: "route", key: "/compliance" })}
+          />
+        ) : null
+      ) : isLoading ? null : !hasAccess && isModuleRoute(view.key) ? (
+        <NoAccess onViewPlans={() => navigate("/billing")} />
       ) : view.key === "/compliance" ? (
-        isLoading ? null : hasAccess ? (
-          <ContractsView onOpen={(c) => setView({ kind: "contract", contract: c })} />
-        ) : (
-          <NoAccess />
-        )
+        <ContractsView
+          onOpen={(c: Contract) => setView({ kind: "contract", contractId: c.id })}
+        />
+      ) : view.key === "/my-tasks" ? (
+        <TasksView />
+      ) : view.key === "/activity" ? (
+        <ActivityView />
+      ) : view.key === "/billing" ? (
+        <BillingView />
       ) : (
         <ComingSoon onBack={() => navigate("/compliance")} />
       )}
     </AppShell>
   );
+}
+
+/**
+ * Routes served by the Contract Compliance module, which the plan must cover.
+ *
+ * Billing is deliberately excluded: a tenant with no entitlement must still be
+ * able to reach the page that sells them one.
+ */
+function isModuleRoute(key: string): boolean {
+  return ["/compliance", "/my-tasks", "/activity"].includes(key);
 }
 
 function moduleMeta(key: string): { title: string; description?: string } {
@@ -78,15 +134,17 @@ function moduleMeta(key: string): { title: string; description?: string } {
   return { title: "Zeus Platform" };
 }
 
-function NoAccess() {
+function NoAccess({ onViewPlans }: { onViewPlans: () => void }) {
   return (
     <div className="rounded-xl border border-dashed border-border p-10 text-center">
       <ShieldCheck className="mx-auto size-8 text-muted-foreground" />
       <h2 className="mt-3 text-lg font-bold text-foreground">Contract Compliance isn&apos;t enabled</h2>
       <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
-        Your workspace doesn&apos;t have an active entitlement for this module. Ask your account
-        owner to enable it from billing.
+        Your workspace doesn&apos;t have an active entitlement for this module yet.
       </p>
+      <Button className="mt-5" onClick={onViewPlans}>
+        View plans
+      </Button>
     </div>
   );
 }

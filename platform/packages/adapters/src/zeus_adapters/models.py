@@ -55,3 +55,16 @@ class EntitlementChange(BaseModel):
     status: str | None = None
     stripe_subscription_id: str | None = None
     raw_event_type: str | None = None
+
+    # The purchased price. Stripe subscription metadata only carries tenant_id,
+    # so this is the only thing that identifies *what* was bought — without it
+    # the plan/module cannot be resolved and the customer pays for nothing.
+    price_id: str | None = None
+    # Needed for the billing portal, which is addressed by customer, not
+    # subscription.
+    stripe_customer_id: str | None = None
+    # Event identity and ordering. `event_id` makes webhook handling idempotent
+    # under Stripe's at-least-once delivery; `occurred_at` lets us ignore an
+    # event that arrives after a newer one has already been applied.
+    event_id: str | None = None
+    occurred_at: int | None = None

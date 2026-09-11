@@ -14,7 +14,19 @@ class RedisCache(Cache):
                 "Redis cache selected but not installed. Install with "
                 "`uv pip install 'zeus-adapters[redis]'`."
             ) from exc
-        self._redis = from_url(url, decode_responses=True)
+
+        kwargs: dict[str, object] = {"decode_responses": True}
+        if url.startswith("rediss://"):
+            # Pin the CA bundle explicitly instead of trusting the host's
+            # store. Upstash's certificate verifies against certifi, but a
+            # slim container or a dev machine with no system roots would fail
+            # at connect time — and a TLS error on first cache write is an
+            # opaque way to discover that.
+            import certifi
+
+            kwargs["ssl_ca_certs"] = certifi.where()
+
+        self._redis = from_url(url, **kwargs)
 
     async def get(self, key: str) -> str | None:
         return await self._redis.get(key)

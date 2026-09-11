@@ -10,6 +10,11 @@ from zeus_adapters.interfaces import Storage
 def build_storage(settings: Settings) -> Storage:
     provider = settings.storage.provider.lower()
 
+    if provider == "local":
+        from zeus_adapters.storage.local_storage import LocalStorage
+
+        return LocalStorage(root=settings.storage.local_path)
+
     if provider == "supabase":
         url = settings.auth.supabase_url
         key = settings.auth.supabase_service_role_key
@@ -21,4 +26,4 @@ def build_storage(settings: Settings) -> Storage:
 
         return SupabaseStorage(url=url, service_role_key=key.get_secret_value())
 
-    raise ValueError(f"Unknown storage provider: {provider!r}. Expected supabase.")
+    raise ValueError(f"Unknown storage provider: {provider!r}. Expected local or supabase.")

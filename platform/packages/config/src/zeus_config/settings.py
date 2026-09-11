@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import StrEnum
 from functools import lru_cache
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -41,6 +41,25 @@ class LlmSettings(_Base):
         default="http://localhost:11434/v1", alias="ZEUS_OLLAMA_BASE_URL"
     )
 
+    # Resilience. Defaults are tuned for interactive requests: three attempts
+    # inside a 60s timeout budget, then fail rather than keep the user waiting.
+    max_attempts: int = Field(default=3, alias="ZEUS_LLM_MAX_ATTEMPTS")
+    retry_base_delay: float = Field(default=0.5, alias="ZEUS_LLM_RETRY_BASE_DELAY")
+    retry_max_delay: float = Field(default=8.0, alias="ZEUS_LLM_RETRY_MAX_DELAY")
+    breaker_failure_threshold: int = Field(
+        default=5, alias="ZEUS_LLM_BREAKER_FAILURE_THRESHOLD"
+    )
+    breaker_recovery_seconds: float = Field(
+        default=30.0, alias="ZEUS_LLM_BREAKER_RECOVERY_SECONDS"
+    )
+
+    # Chunking. Contracts routinely exceed a single context window once we
+    # accept uploaded PDFs, so long bodies are split before extraction.
+    # ~4 chars/token keeps a 24k-char chunk near 6k tokens of input.
+    chunk_chars: int = Field(default=24_000, alias="ZEUS_LLM_CHUNK_CHARS")
+    chunk_overlap_chars: int = Field(default=1_500, alias="ZEUS_LLM_CHUNK_OVERLAP_CHARS")
+    max_chunks: int = Field(default=24, alias="ZEUS_LLM_MAX_CHUNKS")
+
 
 class CacheSettings(_Base):
     provider: str = Field(default="redis", alias="ZEUS_CACHE_PROVIDER")
@@ -70,9 +89,54 @@ class AuthSettings(_Base):
     supabase_jwt_secret: SecretStr | None = Field(default=None, alias="ZEUS_SUPABASE_JWT_SECRET")
 
 
+class SessionSettings(_Base):
+    """Refresh-token cookie policy.
+
+    The short-lived access JWT stays in browser memory; durability across a
+    reload comes from an opaque refresh token in an httpOnly cookie, which
+    script can never read. ``cookie_secure`` is forced on in production by
+    :meth:`Settings._harden_session_cookies`.
+    """
+
+    cookie_name: str = Field(default="zeus_session", alias="ZEUS_SESSION_COOKIE_NAME")
+    # Readable-by-script companion used for the double-submit CSRF check. It
+    # deliberately is *not* httpOnly: the whole point is that same-origin JS can
+    # echo it back in a header that a cross-site form post cannot forge.
+    csrf_cookie_name: str = Field(default="zeus_csrf", alias="ZEUS_SESSION_CSRF_COOKIE_NAME")
+    cookie_path: str = Field(default="/", alias="ZEUS_SESSION_COOKIE_PATH")
+    cookie_domain: str | None = Field(default=None, alias="ZEUS_SESSION_COOKIE_DOMAIN")
+    cookie_secure: bool = Field(default=False, alias="ZEUS_SESSION_COOKIE_SECURE")
+    # "lax" lets the cookie ride top-level navigations back from Stripe Checkout
+    # while still blocking cross-site POSTs; "strict" breaks those returns.
+    cookie_samesite: str = Field(default="lax", alias="ZEUS_SESSION_COOKIE_SAMESITE")
+    # Absolute lifetime of a session family. Rotation issues a new token on
+    # every refresh but never extends this deadline, so a stolen family still
+    # dies on schedule.
+    ttl_days: int = Field(default=14, alias="ZEUS_SESSION_TTL_DAYS")
+    # Grace window in which re-presenting an already-rotated token is treated
+    # as a benign race rather than theft. Two tabs restoring their session at
+    # once, a retried request, or a double-click all land here; genuine replay
+    # attacks essentially never arrive within seconds of the real client's own
+    # refresh. Set to 0 to make detection absolute at the cost of spurious
+    # logouts.
+    reuse_leeway_seconds: int = Field(default=15, alias="ZEUS_SESSION_REUSE_LEEWAY_SECONDS")
+
+    @property
+    def ttl_seconds(self) -> int:
+        return self.ttl_days * 24 * 60 * 60
+
+
 class StorageSettings(_Base):
     provider: str = Field(default="supabase", alias="ZEUS_STORAGE_PROVIDER")
     bucket: str = Field(default="evidence", alias="ZEUS_STORAGE_BUCKET")
+    # Root directory for the `local` provider (dev, CI, self-hosted).
+    local_path: str = Field(default="./.zeus-storage", alias="ZEUS_STORAGE_LOCAL_PATH")
+    # Hard ceiling on a single uploaded document, enforced before any parsing.
+    max_upload_mb: int = Field(default=25, alias="ZEUS_STORAGE_MAX_UPLOAD_MB")
+
+    @property
+    def max_upload_bytes(self) -> int:
+        return self.max_upload_mb * 1024 * 1024
 
 
 class BillingSettings(_Base):
@@ -106,6 +170,7 @@ class Settings(_Base):
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     queue: QueueSettings = Field(default_factory=QueueSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
+    session: SessionSettings = Field(default_factory=SessionSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     billing: BillingSettings = Field(default_factory=BillingSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
@@ -113,6 +178,59 @@ class Settings(_Base):
     @property
     def is_production(self) -> bool:
         return self.env is Environment.production
+
+    @model_validator(mode="after")
+    def _forbid_dev_tokens_in_production(self) -> Settings:
+        """Refuse to start a production process with dev tokens enabled.
+
+        ``/dev/token`` mints a tenant-scoped JWT for any tenant id with no
+        password, so leaving it on in production is a full authentication
+        bypass. Silently disabling it would hide the mistake, so this fails
+        fast instead: the service will not boot with an unsafe configuration.
+        """
+        if self.is_production and self.dev_tokens_enabled:
+            raise ValueError(
+                "ZEUS_DEV_TOKENS must not be enabled when ZEUS_ENV=production. "
+                "The /dev/token endpoint mints tokens for any tenant without a "
+                "password and would be a complete authentication bypass."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _harden_session_cookies(self) -> Settings:
+        """Force ``Secure`` on the session cookie in production.
+
+        Overriding rather than erroring is the right call here because the only
+        reason the flag is off by default is local HTTP development. Turning it
+        on cannot break a correctly-deployed production site (which is HTTPS),
+        whereas leaving it off would let the refresh token leak over plaintext.
+        """
+        if self.is_production and not self.session.cookie_secure:
+            self.session.cookie_secure = True
+        return self
+
+    @model_validator(mode="after")
+    def _require_production_secrets(self) -> Settings:
+        """Fail fast when production is missing a secret it cannot work without.
+
+        Each of these degrades security silently rather than visibly: a default
+        JWT secret means forgeable tokens, and a missing encryption key means
+        tenant secrets are stored unprotected.
+        """
+        if not self.is_production:
+            return self
+
+        missing = []
+        secret = self.auth.supabase_jwt_secret
+        if not secret or not secret.get_secret_value():
+            missing.append("ZEUS_SUPABASE_JWT_SECRET")
+        if not self.secrets_encryption_key or not self.secrets_encryption_key.get_secret_value():
+            missing.append("ZEUS_SECRETS_ENCRYPTION_KEY")
+        if missing:
+            raise ValueError(
+                "Missing required production configuration: " + ", ".join(missing)
+            )
+        return self
 
 
 @lru_cache(maxsize=1)

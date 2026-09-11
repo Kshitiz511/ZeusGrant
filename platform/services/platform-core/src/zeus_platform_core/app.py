@@ -48,7 +48,11 @@ def create_app(container: Container | None = None) -> FastAPI:
     app.include_router(billing_router)
     app.include_router(admin_router)
 
-    if app.state.container.settings.dev_tokens_enabled:
+    settings = app.state.container.settings
+    # Belt and braces: settings validation already refuses to construct a
+    # production Settings with dev tokens on, but the mount is also gated so a
+    # hand-built Settings in a test or script cannot expose it either.
+    if settings.dev_tokens_enabled and not settings.is_production:
         from zeus_platform_core.routers.dev import router as dev_router
 
         app.include_router(dev_router)

@@ -30,7 +30,13 @@ class TokenResponse(BaseModel):
 async def mint_token(body: TokenRequest, container: ContainerDep) -> TokenResponse:
     """Mint a signed JWT for the given tenant/roles so you can click
     'Authorize' in Swagger and exercise protected routes locally."""
-    if not container.settings.dev_tokens_enabled:
+    settings = container.settings
+    # Three independent guards, because this endpoint is a complete auth
+    # bypass if it ever ships: settings validation refuses to boot production
+    # with the flag on, app wiring only mounts the router when the flag is on,
+    # and this check catches the case where the router is mounted directly
+    # (a test, or a future refactor that forgets the wiring rule).
+    if settings.is_production or not settings.dev_tokens_enabled:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
     token = await container.auth.issue_claims(body.user_id, body.tenant_id, body.roles)
     return TokenResponse(access_token=token)

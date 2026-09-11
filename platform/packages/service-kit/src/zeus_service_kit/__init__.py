@@ -6,6 +6,6 @@ token and independently confirm the tenant is entitled to that module. This
 kit provides both so the enforcement logic exists once, not per service.
 """
 
-from zeus_service_kit.security import ServiceSecurity, module_active
+from zeus_service_kit.security import ActorDep, ServiceSecurity, module_active
 
-__all__ = ["ServiceSecurity", "module_active"]
+__all__ = ["ServiceSecurity", "module_active", "ActorDep"]

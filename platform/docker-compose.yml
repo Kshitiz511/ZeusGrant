@@ -51,12 +51,34 @@ services:
       - sh
       - -c
       - |
+        set -e   # any failure aborts, so services never start on a half-migrated DB
+
+        PSQL="psql -h postgres -U zeus -d zeus -v ON_ERROR_STOP=1 -q"
+
+        # Ledger of applied migrations: each file runs exactly once, ever.
+        $$PSQL -c "CREATE SCHEMA IF NOT EXISTS platform;
+                   CREATE TABLE IF NOT EXISTS platform.schema_migrations (
+                       filename    text PRIMARY KEY,
+                       applied_at  timestamptz NOT NULL DEFAULT now()
+                   );"
+
         # Platform schema must exist before module schemas. Directory prefixes
         # (00-, 10-) enforce cross-service ordering; files within sort by name.
         for f in $$(ls /migrations/*/*.sql | sort); do
-          echo "applying $$f";
-          psql -h postgres -U zeus -d zeus -v ON_ERROR_STOP=1 -f "$$f";
+          name=$$(echo "$$f" | sed 's#^/migrations/##')
+          applied=$$($$PSQL -tAc "SELECT 1 FROM platform.schema_migrations WHERE filename = '$$name'")
+          if [ "$$applied" = "1" ]; then
+            echo "skipping  $$name (already applied)"
+            continue
+          fi
+          echo "applying  $$name"
+          # Single transaction per migration: it either lands completely or not
+          # at all, and the ledger row commits with it.
+          $$PSQL --single-transaction \
+            -f "$$f" \
+            -c "INSERT INTO platform.schema_migrations (filename) VALUES ('$$name')"
         done
+        echo "migrations up to date"
 
   platform-core:
     build:
@@ -111,6 +133,15 @@ services:
       ZEUS_LLM_MODEL: "${ZEUS_LLM_MODEL:-gemma3:4b}"
       ZEUS_OLLAMA_BASE_URL: "${ZEUS_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}"
       ZEUS_OPENAI_API_KEY: "${ZEUS_OPENAI_API_KEY:-}"
+      # Uploaded documents. `local` keeps dev self-contained; production sets
+      # ZEUS_STORAGE_PROVIDER=supabase and needs no code change.
+      ZEUS_STORAGE_PROVIDER: "${ZEUS_STORAGE_PROVIDER:-local}"
+      ZEUS_STORAGE_BUCKET: "${ZEUS_STORAGE_BUCKET:-evidence}"
+      ZEUS_STORAGE_LOCAL_PATH: /var/lib/zeus/storage
+      ZEUS_STORAGE_MAX_UPLOAD_MB: "${ZEUS_STORAGE_MAX_UPLOAD_MB:-25}"
+    volumes:
+      # Named volume so uploads survive a container rebuild.
+      - objectdata:/var/lib/zeus/storage
     ports:
       - "8001:8000"
 
@@ -126,3 +157,4 @@ services:
 
 volumes:
   pgdata:
+  objectdata:

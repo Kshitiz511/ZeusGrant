@@ -10,7 +10,7 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";  -- gen_random_uuid()
 
 -- --- Tenants ----------------------------------------------------------------
 -- A tenant is the unit of isolation. The purchaser becomes its owner.
-CREATE TABLE platform.tenants (
+CREATE TABLE IF NOT EXISTS platform.tenants (
     id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     name          text NOT NULL,
     slug          text UNIQUE NOT NULL,
@@ -25,7 +25,7 @@ CREATE TABLE platform.tenants (
 -- --- Users ------------------------------------------------------------------
 -- Mirror of the auth provider's user (Supabase auth.users). We store the id
 -- and email locally so memberships and ownership work without cross-schema FKs.
-CREATE TABLE platform.users (
+CREATE TABLE IF NOT EXISTS platform.users (
     id            uuid PRIMARY KEY,          -- equals auth.users.id
     email         text UNIQUE NOT NULL,
     auth_provider text NOT NULL DEFAULT 'supabase',
@@ -33,7 +33,7 @@ CREATE TABLE platform.users (
 );
 
 -- --- Memberships ------------------------------------------------------------
-CREATE TABLE platform.memberships (
+CREATE TABLE IF NOT EXISTS platform.memberships (
     id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id  uuid NOT NULL REFERENCES platform.tenants(id) ON DELETE CASCADE,
     user_id    uuid NOT NULL REFERENCES platform.users(id) ON DELETE CASCADE,
@@ -42,18 +42,18 @@ CREATE TABLE platform.memberships (
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (tenant_id, user_id)
 );
-CREATE INDEX idx_memberships_user ON platform.memberships(user_id);
-CREATE INDEX idx_memberships_tenant ON platform.memberships(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_memberships_user ON platform.memberships(user_id);
+CREATE INDEX IF NOT EXISTS idx_memberships_tenant ON platform.memberships(tenant_id);
 
 -- --- Modules (the sellable services) ---------------------------------------
-CREATE TABLE platform.modules (
+CREATE TABLE IF NOT EXISTS platform.modules (
     id   text PRIMARY KEY,   -- grant_intelligence | contract_compliance | audit_compliance
     name text NOT NULL,
     slug text UNIQUE NOT NULL
 );
 
 -- --- Plans (per module) -----------------------------------------------------
-CREATE TABLE platform.plans (
+CREATE TABLE IF NOT EXISTS platform.plans (
     id              text PRIMARY KEY,             -- e.g. gi_growth
     module_id       text NOT NULL REFERENCES platform.modules(id),
     name            text NOT NULL,
@@ -63,10 +63,10 @@ CREATE TABLE platform.plans (
     stripe_price_id_annual  text,
     is_active       boolean NOT NULL DEFAULT true
 );
-CREATE INDEX idx_plans_module ON platform.plans(module_id);
+CREATE INDEX IF NOT EXISTS idx_plans_module ON platform.plans(module_id);
 
 -- --- Plan limits (key/value; drives entitlement claims) --------------------
-CREATE TABLE platform.plan_limits (
+CREATE TABLE IF NOT EXISTS platform.plan_limits (
     plan_id     text NOT NULL REFERENCES platform.plans(id) ON DELETE CASCADE,
     limit_key   text NOT NULL,
     limit_value integer,             -- NULL means unlimited
@@ -74,7 +74,7 @@ CREATE TABLE platform.plan_limits (
 );
 
 -- --- Subscriptions (one per tenant per module) -----------------------------
-CREATE TABLE platform.subscriptions (
+CREATE TABLE IF NOT EXISTS platform.subscriptions (
     id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id   uuid NOT NULL REFERENCES platform.tenants(id) ON DELETE CASCADE,
     module_id   text NOT NULL REFERENCES platform.modules(id),
@@ -88,11 +88,11 @@ CREATE TABLE platform.subscriptions (
     updated_at  timestamptz NOT NULL DEFAULT now(),
     UNIQUE (tenant_id, module_id, environment)
 );
-CREATE INDEX idx_subscriptions_tenant ON platform.subscriptions(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_tenant ON platform.subscriptions(tenant_id);
 
 -- --- Entitlements (derived, cached snapshot of access) ---------------------
 -- Single source of truth the guard reads. Recomputed on billing changes.
-CREATE TABLE platform.entitlements (
+CREATE TABLE IF NOT EXISTS platform.entitlements (
     id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id   uuid NOT NULL REFERENCES platform.tenants(id) ON DELETE CASCADE,
     module_id   text NOT NULL REFERENCES platform.modules(id),
@@ -102,11 +102,11 @@ CREATE TABLE platform.entitlements (
     refreshed_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (tenant_id, module_id)
 );
-CREATE INDEX idx_entitlements_tenant ON platform.entitlements(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_entitlements_tenant ON platform.entitlements(tenant_id);
 
 -- --- Platform config (admin-managed key/value; secrets encrypted) ----------
 -- `is_secret` rows store SecretBox ciphertext (zsb1:...) in `value`.
-CREATE TABLE platform.platform_config (
+CREATE TABLE IF NOT EXISTS platform.platform_config (
     key        text PRIMARY KEY,
     value      text,
     is_secret  boolean NOT NULL DEFAULT false,
@@ -115,7 +115,7 @@ CREATE TABLE platform.platform_config (
 );
 
 -- --- Prompt registry (versioned, live-editable) ----------------------------
-CREATE TABLE platform.prompt_registry (
+CREATE TABLE IF NOT EXISTS platform.prompt_registry (
     id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     name       text NOT NULL,             -- logical prompt id, e.g. contract.extract
     version    integer NOT NULL,
@@ -125,7 +125,7 @@ CREATE TABLE platform.prompt_registry (
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (name, version)
 );
-CREATE INDEX idx_prompt_active ON platform.prompt_registry(name) WHERE is_active;
+CREATE INDEX IF NOT EXISTS idx_prompt_active ON platform.prompt_registry(name) WHERE is_active;
 
 -- --- Seed the three sellable modules ---------------------------------------
 INSERT INTO platform.modules (id, name, slug) VALUES

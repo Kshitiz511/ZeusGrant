@@ -14,6 +14,7 @@ from fastapi import FastAPI
 
 from zeus_contract_compliance.container import Container
 from zeus_contract_compliance.jobs import router as jobs_router
+from zeus_contract_compliance.routers import audit_router, obligations_router
 from zeus_contract_compliance.routers import router as contracts_router
 
 
@@ -41,6 +42,8 @@ def create_app(container: Container | None = None) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(contracts_router)
+    app.include_router(obligations_router)
+    app.include_router(audit_router)
     app.include_router(jobs_router)
     return app
 

@@ -58,6 +58,9 @@ class ConfigRepository:
             updated_by,
         )
 
+    async def delete(self, key: str) -> None:
+        await self._db.execute("DELETE FROM platform.platform_config WHERE key = $1", key)
+
 
 class PromptRepository:
     def __init__(self, db: Database) -> None:
