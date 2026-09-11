@@ -19,6 +19,7 @@ ENV_FILE = Path(__file__).resolve().parent.parent / ".env.production.local"
 EXPECTED_PLATFORM = {
     "ai_usage",
     "billing_events",
+    "email_verifications",
     "entitlements",
     "memberships",
     "model_pricing",
@@ -31,6 +32,7 @@ EXPECTED_PLATFORM = {
     "subscriptions",
     "tenants",
     "user_credentials",
+    "user_identities",
     "user_sessions",
     "users",
 }
