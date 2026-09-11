@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from zeus_adapters.llm.json_parsing import MalformedModelOutputError
+from zeus_adapters.models import Extraction
 from zeus_contract_compliance.chunking import chunk_text
 from zeus_contract_compliance.extraction import (
     MAX_DESCRIPTION_CHARS,
@@ -178,10 +179,11 @@ class StubDb:
 
 
 class StubLlm:
-    def __init__(self, responses):
+    def __init__(self, responses, *, tokens_per_call=(100, 25)):
         self._responses = list(responses)
         self.calls: list[str] = []
         self.instructions: list[str] = []
+        self._tokens = tokens_per_call
 
     async def extract(self, schema, text, *, instructions=None):
         self.calls.append(text)
@@ -189,7 +191,16 @@ class StubLlm:
         response = self._responses.pop(0) if self._responses else {"obligations": []}
         if isinstance(response, Exception):
             raise response
-        return response
+        # Cases are written as plain dicts for readability; wrap them so the
+        # stub matches the real provider contract, usage included.
+        if isinstance(response, Extraction):
+            return response
+        return Extraction(
+            data=response,
+            model="stub-model",
+            prompt_tokens=self._tokens[0],
+            completion_tokens=self._tokens[1],
+        )
 
     async def generate(self, *a, **k):  # pragma: no cover - unused
         raise NotImplementedError
@@ -287,8 +298,32 @@ async def test_result_carries_usage_telemetry():
 
     assert result.model == "test-model"
     assert result.chunks == 1
-    assert result.estimated_input_tokens > 0
+    # Counts come from the provider, not from len(text)//4. Output tokens are
+    # recorded too; the previous estimate ignored them entirely even though on
+    # a reasoning model they are often the larger half of the bill.
+    assert result.prompt_tokens == 100
+    assert result.completion_tokens == 25
     assert result.latency_ms >= 0
+
+
+async def test_usage_is_summed_across_chunks():
+    body = ("Deliverable clause. " * 400 + "\n\n") * 12
+    llm = StubLlm([{"obligations": []}] * 20)
+    result = await _service(llm).extract_detailed(body)
+
+    assert result.chunks > 1
+    assert result.prompt_tokens == 100 * result.chunks
+    assert result.completion_tokens == 25 * result.chunks
+
+
+async def test_missing_provider_usage_stays_none_rather_than_zero():
+    # A provider that reports nothing must not be recorded as a free call;
+    # None keeps the metering gap visible.
+    llm = StubLlm([Extraction(data={"obligations": []}, model="m")])
+    result = await _service(llm).extract_detailed("Contract body text here.")
+
+    assert result.prompt_tokens is None
+    assert result.completion_tokens is None
 
 
 async def test_dropped_items_are_counted():

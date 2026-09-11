@@ -9,12 +9,11 @@ that AI extraction persists obligations.
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from fastapi.testclient import TestClient
 from zeus_adapters.cache.memory_cache import MemoryCache
 from zeus_adapters.db.fake_db import FakeDatabase
-from zeus_adapters.models import Session
+from zeus_adapters.models import Extraction, Session
 from zeus_adapters.queue.memory_queue import MemoryQueue
 from zeus_contract_compliance.app import create_app
 from zeus_contract_compliance.container import Container
@@ -38,13 +37,24 @@ class FakeLlm:
     async def generate(self, messages, *, model=None, temperature=0.2):  # pragma: no cover
         raise NotImplementedError
 
-    async def extract(self, schema, text, *, instructions=None) -> dict[str, Any]:
-        return {
-            "obligations": [
-                {"description": "Deliver Q1 report", "due_date": "2026-03-31", "priority": "high"},
-                {"description": "Pay invoice", "priority": "medium"},
-            ]
-        }
+    async def extract(self, schema, text, *, instructions=None) -> Extraction:
+        return Extraction(
+            data={
+                "obligations": [
+                    {
+                        "description": "Deliver Q1 report",
+                        "due_date": "2026-03-31",
+                        "priority": "high",
+                    },
+                    {"description": "Pay invoice", "priority": "medium"},
+                ]
+            },
+            model="fake-model",
+            # Real providers always report usage; the fake does too, so metering
+            # is exercised rather than silently skipped in tests.
+            prompt_tokens=100,
+            completion_tokens=25,
+        )
 
     async def embed(self, text):  # pragma: no cover
         raise NotImplementedError
@@ -65,7 +75,7 @@ def _seed_cache(cache: MemoryCache, *, contracts_max: int | None) -> None:
     cache._store[f"entitlements:{TENANT}"] = (json.dumps(claims), None)  # noqa: SLF001
 
 
-def _build(*, entitled: bool, contracts_max: int | None = 5, contract_count: int = 0):
+def _build(*, entitled: bool, contracts_max: int | None = 5, contract_count: int = 0, llm=None):
     db = FakeDatabase()
     created: list[dict] = []
 
@@ -128,9 +138,14 @@ def _build(*, entitled: bool, contracts_max: int | None = 5, contract_count: int
             None,
         )
 
-    container = Container(db=db, cache=cache, auth=StubAuth(), llm=FakeLlm(), queue=MemoryQueue())
+    container = Container(
+        db=db, cache=cache, auth=StubAuth(), llm=llm or FakeLlm(), queue=MemoryQueue()
+    )
     container.settings.worker_secret = _Secret("worker-secret")
-    return TestClient(create_app(container))
+    client = TestClient(create_app(container))
+    # Exposed so tests can assert on what was written, not just on status codes.
+    client.fake_db = db
+    return client
 
 
 class _Secret:
@@ -183,6 +198,47 @@ def test_ai_analyze_persists_obligations():
     assert len(body) == 2
     assert {o["description"] for o in body} == {"Deliver Q1 report", "Pay invoice"}
     assert all(o["source"] == "ai" for o in body)
+
+
+def _usage_inserts(db):
+    return [
+        args
+        for kind, query, args in db.calls
+        if kind == "execute" and "INSERT INTO platform.ai_usage" in query
+    ]
+
+
+def test_successful_analysis_is_metered_with_real_token_counts():
+    client = _build(entitled=True)
+    client.post("/contracts/c-1/analyze", headers=_auth())
+    (args,) = _usage_inserts(client.fake_db)
+    assert args[0] == TENANT
+    assert args[5] == 100  # prompt tokens, as reported by the provider
+    assert args[6] == 25  # completion tokens
+    assert args[9] is True  # succeeded
+
+
+class ExplodingLlm(FakeLlm):
+    async def extract(self, schema, text, *, instructions=None):
+        raise RuntimeError("provider exploded")
+
+
+def test_failed_analysis_is_metered_to_the_same_ledger():
+    """A failure must land in the same table as a success.
+
+    These were split once: successes went to platform.ai_usage while failures
+    went to the module's own table. Nothing crashed, but every rollup built on
+    the shared ledger reported a 100% success rate by construction, and the
+    budget burned by failures was invisible.
+    """
+    client = _build(entitled=True, llm=ExplodingLlm())
+    resp = client.post("/contracts/c-1/analyze", headers=_auth())
+    assert resp.status_code == 503
+
+    (args,) = _usage_inserts(client.fake_db)
+    assert args[0] == TENANT
+    assert args[9] is False  # succeeded
+    assert "provider exploded" in args[10]
 
 
 def test_async_analyze_enqueues_and_returns_202():

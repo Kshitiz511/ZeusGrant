@@ -108,7 +108,11 @@ class ExtractionResult:
     model: str
     chunks: int
     chunks_failed: int
-    estimated_input_tokens: int
+    #: Summed from what the provider reported, per chunk. ``None`` means no
+    #: chunk reported usage -- kept distinct from 0 so a metering gap is
+    #: visible rather than reading as free.
+    prompt_tokens: int | None
+    completion_tokens: int | None
     latency_ms: int
     dropped: int
 
@@ -151,7 +155,8 @@ class ExtractionService:
             model=self._model,
             chunks=0,
             chunks_failed=0,
-            estimated_input_tokens=0,
+            prompt_tokens=None,
+            completion_tokens=None,
             latency_ms=0,
             dropped=0,
         )
@@ -172,10 +177,15 @@ class ExtractionService:
         seen: set[str] = set()
         dropped = 0
         failed = 0
+        # Accumulated across chunks. A chunk that fails still consumed input
+        # tokens, but the provider only reports usage on a successful response,
+        # so these are what we were actually billed for and can prove.
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
 
         for index, chunk in enumerate(chunks):
             try:
-                payload = await self._llm.extract(
+                result = await self._llm.extract(
                     _SCHEMA, _fence(chunk), instructions=instructions
                 )
             except MalformedModelOutputError as exc:
@@ -193,7 +203,12 @@ class ExtractionService:
                     raise
                 continue
 
-            for item in coerce_list(payload, "obligations"):
+            if result.prompt_tokens is not None:
+                prompt_tokens = (prompt_tokens or 0) + result.prompt_tokens
+            if result.completion_tokens is not None:
+                completion_tokens = (completion_tokens or 0) + result.completion_tokens
+
+            for item in coerce_list(result.data, "obligations"):
                 draft = _to_draft(item)
                 if draft is None:
                     dropped += 1
@@ -220,10 +235,8 @@ class ExtractionService:
             model=self._model,
             chunks=len(chunks),
             chunks_failed=failed,
-            # Exact token counts are provider-specific and not exposed by the
-            # extract() interface; ~4 chars/token is the standard approximation
-            # and is accurate enough for cost attribution and alerting.
-            estimated_input_tokens=sum(len(c) for c in chunks) // 4,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
             latency_ms=int((time.monotonic() - started) * 1000),
             dropped=dropped,
         )

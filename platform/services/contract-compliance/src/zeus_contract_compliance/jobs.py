@@ -76,23 +76,39 @@ async def run_analyze_job(
             job.tenant_id, job.contract_id
         )
 
-        drafts = await container.extraction.extract_detailed(contract.body or "")
+        drafts = None
+        try:
+            drafts = await container.extraction.extract_detailed(contract.body or "")
+        except Exception as exc:
+            # Parity with the synchronous route. Without this the queued path --
+            # which becomes the primary path once extraction moves off the
+            # request -- would burn budget on failures that never appear in any
+            # ledger, and the spend figures would drift low with no way to tell.
+            await container.metering.record(
+                tenant_id=job.tenant_id,
+                actor_id=None,
+                module_id="contract_compliance",
+                operation="extract_obligations",
+                model=container.settings.llm.model,
+                succeeded=False,
+                error=str(exc),
+            )
+            raise
+
         created = await container.obligations.bulk_insert_ai(
             tenant_id=job.tenant_id, contract_id=job.contract_id, drafts=drafts.obligations
         )
         await container.contracts.mark_analyzed(job.tenant_id, job.contract_id)
-        await container.ai_usage.record(
+        await container.metering.record(
             tenant_id=job.tenant_id,
-            contract_id=job.contract_id,
             actor_id=None,
+            module_id="contract_compliance",
             operation="extract_obligations",
             model=drafts.model,
-            chunks=drafts.chunks,
-            chunks_failed=drafts.chunks_failed,
-            estimated_input_tokens=drafts.estimated_input_tokens,
-            obligations_found=created,
-            obligations_dropped=drafts.dropped,
+            prompt_tokens=drafts.prompt_tokens,
+            completion_tokens=drafts.completion_tokens,
             latency_ms=drafts.latency_ms,
+            succeeded=drafts.chunks_failed < drafts.chunks,
         )
         await container.audit.record(
             tenant_id=job.tenant_id,

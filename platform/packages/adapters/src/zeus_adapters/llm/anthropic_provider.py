@@ -7,7 +7,7 @@ from typing import Any
 
 from zeus_adapters.interfaces import LlmProvider
 from zeus_adapters.llm.json_parsing import parse_json_object
-from zeus_adapters.models import Completion, Message, Role
+from zeus_adapters.models import Completion, Extraction, Message, Role
 
 
 class AnthropicProvider(LlmProvider):
@@ -53,7 +53,7 @@ class AnthropicProvider(LlmProvider):
 
     async def extract(
         self, schema: dict[str, Any], text: str, *, instructions: str | None = None
-    ) -> dict[str, Any]:
+    ) -> Extraction:
         system = (instructions or "Extract structured data.") + " Respond with JSON only."
         resp = await self._client.messages.create(
             model=self._model,
@@ -68,7 +68,15 @@ class AnthropicProvider(LlmProvider):
             max_tokens=4096,
         )
         raw = "".join(block.text for block in resp.content if block.type == "text")
-        return parse_json_object(raw or "")
+        usage = getattr(resp, "usage", None)
+        return Extraction(
+            data=parse_json_object(raw or ""),
+            model=getattr(resp, "model", self._model),
+            # Anthropic names these differently from OpenAI; normalise here so
+            # callers never branch on provider.
+            prompt_tokens=getattr(usage, "input_tokens", None),
+            completion_tokens=getattr(usage, "output_tokens", None),
+        )
 
     async def embed(self, text: str) -> list[float]:
         raise NotImplementedError(

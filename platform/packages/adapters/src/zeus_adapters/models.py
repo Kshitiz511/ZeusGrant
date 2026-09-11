@@ -30,6 +30,26 @@ class Completion(BaseModel):
     raw: dict | None = None
 
 
+class Extraction(BaseModel):
+    """Structured extraction plus the usage the provider reported.
+
+    ``extract()`` used to return a bare dict, which made accurate cost
+    attribution impossible: the provider reports exact token counts on every
+    response and the interface discarded them, leaving callers to approximate
+    from character counts. Token counts are billing evidence, so they travel
+    with the result rather than being reconstructed.
+
+    ``None`` token fields mean the provider reported nothing -- deliberately
+    distinct from a genuine zero, so a gap in metering is visible instead of
+    silently reading as free.
+    """
+
+    data: dict
+    model: str
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+
+
 class Session(BaseModel):
     """A verified auth session, provider-agnostic."""
 

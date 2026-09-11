@@ -7,7 +7,7 @@ from typing import Any
 
 from zeus_adapters.interfaces import LlmProvider
 from zeus_adapters.llm.json_parsing import parse_json_object
-from zeus_adapters.models import Completion, Message, Role
+from zeus_adapters.models import Completion, Extraction, Message, Role
 
 
 class GeminiProvider(LlmProvider):
@@ -43,7 +43,7 @@ class GeminiProvider(LlmProvider):
 
     async def extract(
         self, schema: dict[str, Any], text: str, *, instructions: str | None = None
-    ) -> dict[str, Any]:
+    ) -> Extraction:
         system = (instructions or "Extract structured data.") + " Respond with JSON only."
         resp = await self._client.aio.models.generate_content(
             model=self._model,
@@ -54,7 +54,13 @@ class GeminiProvider(LlmProvider):
                 "response_mime_type": "application/json",
             },
         )
-        return parse_json_object(resp.text or "")
+        usage = getattr(resp, "usage_metadata", None)
+        return Extraction(
+            data=parse_json_object(resp.text or ""),
+            model=self._model,
+            prompt_tokens=getattr(usage, "prompt_token_count", None),
+            completion_tokens=getattr(usage, "candidates_token_count", None),
+        )
 
     async def embed(self, text: str) -> list[float]:
         resp = await self._client.aio.models.embed_content(

@@ -17,9 +17,11 @@ from pathlib import Path
 ENV_FILE = Path(__file__).resolve().parent.parent / ".env.production.local"
 
 EXPECTED_PLATFORM = {
+    "ai_usage",
     "billing_events",
     "entitlements",
     "memberships",
+    "model_pricing",
     "modules",
     "plan_limits",
     "plans",

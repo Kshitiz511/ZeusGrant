@@ -15,6 +15,7 @@ from zeus_adapters.models import (
     CheckoutSession,
     Completion,
     EntitlementChange,
+    Extraction,
     Message,
     Session,
 )
@@ -31,8 +32,13 @@ class LlmProvider(ABC):
     @abstractmethod
     async def extract(
         self, schema: dict[str, Any], text: str, *, instructions: str | None = None
-    ) -> dict[str, Any]:
-        """Return structured JSON matching ``schema`` extracted from ``text``."""
+    ) -> Extraction:
+        """Extract JSON matching ``schema`` from ``text``, with usage attached.
+
+        Returns :class:`Extraction` rather than a bare dict so the provider's
+        reported token counts reach the caller. Cost attribution is only as
+        honest as these numbers, and they cannot be recovered afterwards.
+        """
 
     @abstractmethod
     async def embed(self, text: str) -> list[float]: ...

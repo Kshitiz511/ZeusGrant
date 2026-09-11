@@ -16,7 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 from zeus_adapters.cache.memory_cache import MemoryCache
 from zeus_adapters.db.fake_db import FakeDatabase
-from zeus_adapters.models import Session
+from zeus_adapters.models import Extraction, Session
 from zeus_adapters.queue.memory_queue import MemoryQueue
 from zeus_contract_compliance.app import create_app
 from zeus_contract_compliance.container import Container
@@ -40,8 +40,13 @@ class FakeLlm:
     async def generate(self, messages, *, model=None, temperature=0.2):  # pragma: no cover
         raise NotImplementedError
 
-    async def extract(self, schema, text, *, instructions=None) -> dict[str, Any]:
-        return {"obligations": [{"description": "Deliver Q1 report", "priority": "high"}]}
+    async def extract(self, schema, text, *, instructions=None) -> Extraction:
+        return Extraction(
+            data={"obligations": [{"description": "Deliver Q1 report", "priority": "high"}]},
+            model="fake-model",
+            prompt_tokens=100,
+            completion_tokens=25,
+        )
 
     async def embed(self, text):  # pragma: no cover
         raise NotImplementedError

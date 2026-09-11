@@ -26,6 +26,7 @@ from zeus_adapters.interfaces import (
 )
 from zeus_config import Settings, get_settings
 from zeus_service_kit import ServiceSecurity
+from zeus_service_kit.metering import AiUsageRecorder
 
 from zeus_contract_compliance.extraction import ExtractionService
 from zeus_contract_compliance.ingestion import IngestionService
@@ -111,6 +112,16 @@ class Container:
     @cached_property
     def ai_usage(self) -> AiUsageRepository:
         return AiUsageRepository(self.db)
+
+    @cached_property
+    def metering(self) -> AiUsageRecorder:
+        """Platform-wide usage ledger.
+
+        Superseded ``ai_usage`` for billing: that table stored a character-count
+        estimate and no output tokens or cost, and being module-scoped it could
+        not answer the owner's cross-tenant question at all.
+        """
+        return AiUsageRecorder(self.db)
 
     @cached_property
     def extraction(self) -> ExtractionService:

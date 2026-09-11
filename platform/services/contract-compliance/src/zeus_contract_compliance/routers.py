@@ -545,10 +545,12 @@ async def analyze_contract(
     except Exception as exc:
         # A failed extraction still consumed budget and is the signal that
         # something is wrong, so it is recorded before the error propagates.
-        await container.ai_usage.record(
+        # This must go to the same ledger as the success path -- splitting them
+        # would make every rollup report a 100% success rate by construction.
+        await container.metering.record(
             tenant_id=tenant_id,
-            contract_id=contract_id,
             actor_id=actor_id,
+            module_id="contract_compliance",
             operation="extract_obligations",
             model=container.settings.llm.model,
             succeeded=False,
@@ -564,18 +566,16 @@ async def analyze_contract(
         tenant_id=tenant_id, contract_id=contract_id, drafts=drafts
     )
     await container.contracts.mark_analyzed(tenant_id, contract_id)
-    await container.ai_usage.record(
+    await container.metering.record(
         tenant_id=tenant_id,
-        contract_id=contract_id,
         actor_id=actor_id,
+        module_id="contract_compliance",
         operation="extract_obligations",
         model=result.model,
-        chunks=result.chunks,
-        chunks_failed=result.chunks_failed,
-        estimated_input_tokens=result.estimated_input_tokens,
-        obligations_found=len(drafts),
-        obligations_dropped=result.dropped,
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
         latency_ms=result.latency_ms,
+        succeeded=result.chunks_failed < result.chunks,
     )
 
     await _audit(

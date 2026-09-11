@@ -29,7 +29,7 @@ import time
 from typing import Any
 
 from zeus_adapters.interfaces import LlmProvider
-from zeus_adapters.models import Completion, Message
+from zeus_adapters.models import Completion, Extraction, Message
 
 log = logging.getLogger(__name__)
 
@@ -194,7 +194,7 @@ class ResilientLlmProvider(LlmProvider):
 
     async def extract(
         self, schema: dict[str, Any], text: str, *, instructions: str | None = None
-    ) -> dict[str, Any]:
+    ) -> Extraction:
         return await self._call(
             "extract", self._inner.extract, schema, text, instructions=instructions
         )

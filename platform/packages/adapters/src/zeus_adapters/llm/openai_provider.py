@@ -11,7 +11,7 @@ from typing import Any
 
 from zeus_adapters.interfaces import LlmProvider
 from zeus_adapters.llm.json_parsing import parse_json_object
-from zeus_adapters.models import Completion, Message
+from zeus_adapters.models import Completion, Extraction, Message
 
 
 class OpenAiProvider(LlmProvider):
@@ -55,7 +55,7 @@ class OpenAiProvider(LlmProvider):
 
     async def extract(
         self, schema: dict[str, Any], text: str, *, instructions: str | None = None
-    ) -> dict[str, Any]:
+    ) -> Extraction:
         system = instructions or "Extract structured data. Respond with JSON only."
         kwargs: dict[str, Any] = {}
         if self._is_reasoning_model(self._model):
@@ -75,7 +75,13 @@ class OpenAiProvider(LlmProvider):
             response_format={"type": "json_object"},
             **kwargs,
         )
-        return parse_json_object(resp.choices[0].message.content or "")
+        usage = resp.usage
+        return Extraction(
+            data=parse_json_object(resp.choices[0].message.content or ""),
+            model=resp.model,
+            prompt_tokens=getattr(usage, "prompt_tokens", None),
+            completion_tokens=getattr(usage, "completion_tokens", None),
+        )
 
     async def embed(self, text: str) -> list[float]:
         resp = await self._client.embeddings.create(

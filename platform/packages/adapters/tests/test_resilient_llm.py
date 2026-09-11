@@ -11,7 +11,7 @@ from zeus_adapters.llm.resilient import (
     ResilientLlmProvider,
     is_retryable,
 )
-from zeus_adapters.models import Completion, Message, Role
+from zeus_adapters.models import Completion, Extraction, Message, Role
 
 
 class FlakyProvider:
@@ -26,7 +26,12 @@ class FlakyProvider:
         self.calls += 1
         if self.calls <= self.fail_times:
             raise self._exc
-        return {"obligations": [{"description": "ok"}]}
+        return Extraction(
+            data={"obligations": [{"description": "ok"}]},
+            model="fake-model",
+            prompt_tokens=10,
+            completion_tokens=5,
+        )
 
     async def generate(self, messages, *, model=None, temperature=0.2):
         self.calls += 1
@@ -52,7 +57,7 @@ async def test_retries_transient_failure_then_succeeds():
 
     result = await provider.extract({}, "text")
 
-    assert result["obligations"][0]["description"] == "ok"
+    assert result.data["obligations"][0]["description"] == "ok"
     assert inner.calls == 3
 
 
@@ -117,10 +122,10 @@ async def test_circuit_half_opens_after_recovery_window():
 
     # Provider has recovered; the trial call should succeed and close the circuit.
     result = await provider.extract({}, "text")
-    assert result["obligations"][0]["description"] == "ok"
+    assert result.data["obligations"][0]["description"] == "ok"
 
     result = await provider.extract({}, "text")
-    assert result["obligations"]
+    assert result.data["obligations"]
 
 
 async def test_non_retryable_error_does_not_open_the_circuit():
