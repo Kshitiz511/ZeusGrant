@@ -33,6 +33,12 @@ jobs:
         with:
           node-version: 20
 
+      # `vercel build` resolves the Python function's dependencies with uv, the
+      # same way the hosted builder does. Without it the build fails before it
+      # ever reaches the deploy step.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Install Vercel CLI
         run: npm install --global vercel@latest
 
