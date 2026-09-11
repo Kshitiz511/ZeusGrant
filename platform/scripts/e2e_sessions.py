@@ -143,28 +143,32 @@ def main() -> int:
         f"got {status}",
     )
     third_cookie = client.cookie("zeus_session")
-    third_csrf = client.cookie("zeus_csrf")
+    check("the concurrent tab got its own distinct token", third_cookie != second_cookie)
 
     # The successor from the first refresh must still be alive too.
     client.set_cookie_value("zeus_session", second_cookie)
     status, _ = client.post("/auth/refresh", headers={"x-csrf-token": second_csrf})
     check("the other tab's session survives", status == 200, f"got {status}")
+    live_cookie = client.cookie("zeus_session")
+    live_csrf = client.cookie("zeus_csrf")
 
     # --- Reuse detection (stale replay) ------------------------------------
-    # Age the rotation past the leeway so this looks like a captured cookie
-    # rather than a race.
+    # Replay a token that was already *consumed*, aged past the leeway, so it
+    # looks like a captured cookie rather than a race. Replaying third_cookie
+    # here would prove nothing: it was issued by the concurrent refresh and
+    # never used, so accepting it is correct behaviour.
     expire_leeway()
-    client.set_cookie_value("zeus_session", third_cookie)
-    status, _ = client.post("/auth/refresh", headers={"x-csrf-token": third_csrf})
+    client.set_cookie_value("zeus_session", first_cookie)
+    status, _ = client.post("/auth/refresh", headers={"x-csrf-token": first_csrf})
     check("a stale replayed cookie is rejected", status == 401, f"got {status}")
 
-    # ...and the replay must have killed the family, successors included.
-    latest = client.cookie("zeus_session")
-    status, _ = client.post("/auth/refresh", headers={"x-csrf-token": client.cookie("zeus_csrf")})
+    # ...and the replay must have killed the family, live successors included.
+    client.set_cookie_value("zeus_session", live_cookie)
+    status, _ = client.post("/auth/refresh", headers={"x-csrf-token": live_csrf})
     check(
         "reuse detection revokes the whole family",
         status == 401,
-        f"got {status} (cookie {latest!r})",
+        f"got {status}",
     )
 
     # --- Logout -------------------------------------------------------------

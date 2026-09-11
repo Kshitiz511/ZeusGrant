@@ -86,8 +86,9 @@ async def test_lifespan_starts_both_sub_apps(monkeypatch):
 
 
 def test_startup_failure_degrades_instead_of_crashing_the_function(monkeypatch):
-    import api.index as entry
     from fastapi.testclient import TestClient
+
+    import api.index as entry
 
     async def boom():
         raise RuntimeError("pool refused")
@@ -107,8 +108,9 @@ def test_startup_failure_degrades_instead_of_crashing_the_function(monkeypatch):
 
 
 def test_startup_failure_is_retried_on_the_next_request(monkeypatch):
-    import api.index as entry
     from fastapi.testclient import TestClient
+
+    import api.index as entry
 
     attempts: list[int] = []
 
@@ -127,6 +129,41 @@ def test_startup_failure_is_retried_on_the_next_request(monkeypatch):
     # Caching the failure as "started" would leave the instance permanently
     # broken after a momentary database blip.
     assert client.get("/api/health").status_code == 200
+
+
+def test_unmatched_api_path_404s_instead_of_returning_the_spa(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import api.index as entry
+
+    if not (entry._DIST / "index.html").exists():
+        pytest.skip("console not built")
+
+    monkeypatch.setattr(core_app.state.container, "startup", _noop)
+    monkeypatch.setattr(cc_app.state.container, "startup", _noop)
+
+    # The SPA catch-all is mounted at "/", so an unmatched API path reaches it.
+    # Answering with 200 and HTML would surface to clients as a JSON parse
+    # error and would look like success to monitoring.
+    res = TestClient(app).get("/api/does-not-exist")
+    assert res.status_code == 404
+    assert "text/html" not in res.headers.get("content-type", "")
+
+
+def test_deep_link_returns_the_spa_for_client_side_routing(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import api.index as entry
+
+    if not (entry._DIST / "index.html").exists():
+        pytest.skip("console not built")
+
+    monkeypatch.setattr(core_app.state.container, "startup", _noop)
+    monkeypatch.setattr(cc_app.state.container, "startup", _noop)
+
+    res = TestClient(app).get("/contracts/123")
+    assert res.status_code == 200
+    assert "text/html" in res.headers["content-type"]
 
 
 async def _noop() -> None:

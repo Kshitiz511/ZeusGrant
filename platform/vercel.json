@@ -4,13 +4,11 @@
   "outputDirectory": "apps/console/dist",
   "functions": {
     "api/index.py": {
-      "maxDuration": 60
+      "maxDuration": 60,
+      "includeFiles": "apps/console/dist/**"
     }
   },
-  "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/index" },
-    { "source": "/((?!api/).*)", "destination": "/index.html" }
-  ],
+  "rewrites": [{ "source": "/__probe/(.*)", "destination": "/api/index" }],
   "headers": [
     {
       "source": "/(.*)",

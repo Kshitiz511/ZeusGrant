@@ -41,6 +41,8 @@ for _svc in ("services/platform-core", "services/contract-compliance"):
 
 from fastapi import FastAPI, Request, Response  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+from starlette.exceptions import HTTPException as StarletteHTTPException  # noqa: E402
 from zeus_contract_compliance.app import create_app as create_cc_app  # noqa: E402
 from zeus_platform_core.app import create_app as create_core_app  # noqa: E402
 
@@ -144,3 +146,45 @@ async def health() -> JSONResponse:
 
 app.mount("/api/core", core_app)
 app.mount("/api/cc", cc_app)
+
+
+# --- console (SPA) --------------------------------------------------------
+#
+# Vercel detects this project as a backend framework and routes every path to
+# this function, so the built console is served from here rather than from the
+# static output directory. That is also the topology we want: the frontend and
+# API share an origin, so session cookies stay host-scoped and there is no CORS
+# surface at all.
+#
+# Mounted last so it cannot shadow /api/*.
+_DIST = _ROOT / "apps" / "console" / "dist"
+
+if _DIST.is_dir():
+
+    class _SpaFiles(StaticFiles):
+        """Static files with client-side-routing fallback.
+
+        A deep link such as /contracts/123 has no file behind it; the router
+        resolves it in the browser. Unknown paths therefore return index.html
+        instead of 404.
+
+        ``/api`` is excluded explicitly. The sub-apps are mounted on exact
+        prefixes, so an unmatched API path (a typo, a removed endpoint, a
+        version skew) falls through to this mount and would be answered with
+        200 and a page of HTML -- a client would see a JSON parse error instead
+        of a 404, and monitoring would record success.
+        """
+
+        async def get_response(self, path: str, scope):  # type: ignore[override]
+            try:
+                return await super().get_response(path, scope)
+            except StarletteHTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+                if scope.get("path", "").startswith("/api"):
+                    raise
+                return await super().get_response("index.html", scope)
+
+    app.mount("/", _SpaFiles(directory=str(_DIST), html=True), name="console")
+else:  # pragma: no cover - only when the frontend has not been built
+    logger.warning("console.dist_missing path=%s", _DIST)
