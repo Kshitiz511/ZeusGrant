@@ -1,0 +1,16 @@
+# Vercel installs this before bundling the function in api/.
+#
+# The workspace packages are installed from the local source tree rather than a
+# registry, so a deploy always matches the commit being deployed. uv.lock is the
+# source of truth for local development; this file exists because Vercel's
+# Python runtime only understands pip.
+#
+# Extras are pinned to what production actually uses: postgres, redis, stripe,
+# supabase and openai. Anthropic, Gemini and Ollama are deliberately omitted --
+# bundling unused SDKs inflates the function and slows every cold start.
+
+./packages/config
+./packages/adapters[postgres,redis,stripe,supabase,openai]
+./packages/service-kit
+./services/platform-core
+./services/contract-compliance
