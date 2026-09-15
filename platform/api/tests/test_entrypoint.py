@@ -166,5 +166,31 @@ def test_deep_link_returns_the_spa_for_client_side_routing(monkeypatch):
     assert "text/html" in res.headers["content-type"]
 
 
+def test_missing_build_asset_404s_instead_of_returning_the_spa(monkeypatch):
+    """A stale bundle request must fail loudly, not silently serve HTML.
+
+    Assets are content-hashed, so the filename changes on every deploy. A
+    browser holding the previous page asks for the old hash. When that fell
+    through to index.html the browser tried to parse HTML as JavaScript, threw
+    a syntax error, and rendered a blank white page -- with a 200 in the
+    network tab and nothing to point at. A 404 is the truth and is debuggable.
+    """
+    from fastapi.testclient import TestClient
+
+    import api.index as entry
+
+    if not (entry._DIST / "index.html").exists():
+        pytest.skip("console not built")
+
+    monkeypatch.setattr(core_app.state.container, "startup", _noop)
+    monkeypatch.setattr(cc_app.state.container, "startup", _noop)
+
+    client = TestClient(app)
+    for path in ("/assets/index-STALEHASH.js", "/assets/index-STALEHASH.css"):
+        res = client.get(path)
+        assert res.status_code == 404, path
+        assert "text/html" not in res.headers.get("content-type", ""), path
+
+
 async def _noop() -> None:
     return None

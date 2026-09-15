@@ -168,11 +168,22 @@ if _DIST.is_dir():
         resolves it in the browser. Unknown paths therefore return index.html
         instead of 404.
 
-        ``/api`` is excluded explicitly. The sub-apps are mounted on exact
-        prefixes, so an unmatched API path (a typo, a removed endpoint, a
-        version skew) falls through to this mount and would be answered with
-        200 and a page of HTML -- a client would see a JSON parse error instead
+        Two kinds of path are excluded from that fallback, for the same
+        reason: returning HTML with a 200 to something that is not a page
+        turns a clean 404 into a confusing parse error somewhere else.
+
+        ``/api`` -- the sub-apps are mounted on exact prefixes, so an
+        unmatched API path (a typo, a removed endpoint, a version skew) falls
+        through to this mount. A client would see a JSON parse error instead
         of a 404, and monitoring would record success.
+
+        ``/assets`` and anything else with a file extension -- every build
+        asset is content-hashed, so its name changes on each deploy. A browser
+        holding the previous page (or a tab left open across a deploy) asks
+        for the old hash. Falling back served index.html as the script, the
+        parse failed, and the whole console rendered as a blank white page
+        with no failed request to point at. A 404 makes the browser report a
+        missing script, which is the truth and is actionable.
         """
 
         async def get_response(self, path: str, scope):  # type: ignore[override]
@@ -181,7 +192,12 @@ if _DIST.is_dir():
             except StarletteHTTPException as exc:
                 if exc.status_code != 404:
                     raise
-                if scope.get("path", "").startswith("/api"):
+                request_path = scope.get("path", "")
+                if request_path.startswith("/api"):
+                    raise
+                # A trailing extension means the caller wanted a file, not a
+                # route. Client routes in this console are extension-free.
+                if "." in request_path.rsplit("/", 1)[-1]:
                     raise
                 return await super().get_response("index.html", scope)
 
