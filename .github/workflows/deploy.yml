@@ -42,6 +42,35 @@ jobs:
       - name: Install Vercel CLI
         run: npm install --global vercel@latest
 
+      # Schema first, and before anything is built or deployed.
+      #
+      # ci.yml proves migrations apply to an empty database; it says nothing
+      # about production, which was three versions behind because no step here
+      # ever touched it. New code that expects a column production does not
+      # have fails at runtime, after the deploy reports success.
+      #
+      # Ordering is migrate-then-deploy because every migration is written to
+      # be applied ahead of the code that needs it. The reverse order
+      # guarantees a broken window; this order costs a short one only when a
+      # migration removes something the running code still uses.
+      #
+      # The ledger makes this safe to repeat: already-applied files are
+      # skipped, so a re-run or a manual redeploy is a no-op.
+      - name: Apply migrations to production
+        env:
+          ZEUS_MIGRATE_URL: ${{ secrets.ZEUS_MIGRATE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ZEUS_MIGRATE_URL:-}" ]; then
+            echo "ZEUS_MIGRATE_URL is not set on the production environment."
+            echo "Add it as a secret (session pooler, port 5432)."
+            exit 1
+          fi
+          # Shown first so the log records what was about to change, even if
+          # the apply then fails part way.
+          uv run --with asyncpg python scripts/migrate.py --dry-run
+          uv run --with asyncpg python scripts/migrate.py
+
       - name: Pull Vercel environment
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}

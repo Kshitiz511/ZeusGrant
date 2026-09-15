@@ -26,8 +26,12 @@ from zeus_adapters.interfaces import (
 )
 from zeus_config import Settings, get_settings
 from zeus_service_kit import ServiceSecurity
+from zeus_service_kit.dispatch import JobNotifier
+from zeus_service_kit.jobs import JobRepository
 from zeus_service_kit.metering import AiUsageRecorder
+from zeus_service_kit.worker import Worker
 
+from zeus_contract_compliance.domain import MODULE_ID, WAKE_TOPIC
 from zeus_contract_compliance.extraction import ExtractionService
 from zeus_contract_compliance.ingestion import IngestionService
 from zeus_contract_compliance.repository import (
@@ -78,6 +82,37 @@ class Container:
     @cached_property
     def queue(self) -> Queue:
         return self._queue_override or build_queue(self.settings)
+
+    @cached_property
+    def jobs(self) -> JobRepository:
+        """This module's job ledger, wired to wake its own worker.
+
+        The notifier is attached here rather than at each call site so that no
+        enqueue can be written that forgets it. The ledger is the record of
+        what work exists; the queue only makes a worker start sooner than the
+        next scheduled sweep.
+        """
+        secret = self.settings.worker_secret
+        return JobRepository(
+            self.db,
+            MODULE_ID,
+            notify=JobNotifier(
+                lambda: self.queue,
+                WAKE_TOPIC,
+                secret=secret.get_secret_value() if secret else None,
+            ),
+        )
+
+    def build_worker(self, *, kinds: list[str] | None = None) -> Worker:
+        """A worker bound to this container.
+
+        Not cached: each call returns a worker with its own identity, so two
+        concurrent HTTP drains cannot claim jobs under the same worker id and
+        overwrite each other's leases.
+        """
+        from zeus_contract_compliance.job_handlers import registry
+
+        return Worker(jobs=self.jobs, container=self, handlers=registry, kinds=kinds)
 
     @cached_property
     def storage(self) -> Storage:

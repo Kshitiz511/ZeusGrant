@@ -20,6 +20,7 @@ from zeus_adapters import (
     build_billing_provider,
     build_cache,
     build_database,
+    build_queue,
 )
 from zeus_adapters.interfaces import (
     AuthProvider,
@@ -27,6 +28,7 @@ from zeus_adapters.interfaces import (
     Cache,
     Database,
     EmailSender,
+    Queue,
 )
 from zeus_config import SecretBox, Settings, get_settings
 
@@ -38,6 +40,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
         EmailVerificationService,
     )
     from zeus_platform_core.services.google_oauth import GoogleOAuthService
+    from zeus_platform_core.services.grant_service import GrantService
+
+from zeus_service_kit.dispatch import JobNotifier
+from zeus_service_kit.jobs import JobRepository
 
 from zeus_platform_core.repositories.billing import (
     BillingEventRepository,
@@ -45,12 +51,14 @@ from zeus_platform_core.repositories.billing import (
     SubscriptionRepository,
 )
 from zeus_platform_core.repositories.config_registry import ConfigRepository, PromptRepository
+from zeus_platform_core.repositories.opportunities import OpportunityRepository
 from zeus_platform_core.repositories.plans import PlanRepository
 from zeus_platform_core.repositories.sessions import SessionRepository
 from zeus_platform_core.repositories.tenants import TenantRepository
 from zeus_platform_core.services.auth_service import AuthService
 from zeus_platform_core.services.billing_service import BillingService
 from zeus_platform_core.services.entitlements_service import EntitlementsService
+from zeus_platform_core.services.job_handlers import MODULE_ID, WAKE_TOPIC
 from zeus_platform_core.services.runtime_config import (
     MANAGED_KEYS,
     RuntimeConfigService,
@@ -113,6 +121,7 @@ class Container:
         auth: AuthProvider | None = None,
         billing_provider: BillingProvider | None = None,
         email: EmailSender | None = None,
+        queue: Queue | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self._db_override = db
@@ -120,6 +129,7 @@ class Container:
         self._auth_override = auth
         self._billing_provider_override = billing_provider
         self._email_override = email
+        self._queue_override = queue
         # Settings with admin-dashboard overrides applied. Starts as the plain
         # environment view so the app is usable before the database is reachable.
         self._effective: Settings = self.settings
@@ -175,6 +185,40 @@ class Container:
     @cached_property
     def prompts(self) -> PromptRepository:
         return PromptRepository(self.db)
+
+    @cached_property
+    def queue(self) -> Queue:
+        """The wake-up channel. QStash in production, in-memory locally.
+
+        Carries no state: see :mod:`zeus_service_kit.dispatch`. The ledger is
+        the record of what work exists; this only makes a worker start sooner
+        than the next scheduled sweep.
+        """
+        return self._queue_override or build_queue(self._effective)
+
+    @cached_property
+    def jobs(self) -> JobRepository:
+        """The Grant Intelligence job ledger, wired to wake its own worker.
+
+        The notifier is attached here rather than at each call site so that no
+        enqueue can be written that forgets it. Without it, a serverless
+        deployment has nothing polling, and queued scans would sit untouched
+        while the API cheerfully returned a job id to poll.
+        """
+        secret = self._effective.worker_secret
+        return JobRepository(
+            self.db,
+            MODULE_ID,
+            notify=JobNotifier(
+                lambda: self.queue,
+                WAKE_TOPIC,
+                secret=secret.get_secret_value() if secret else None,
+            ),
+        )
+
+    @cached_property
+    def opportunities(self) -> OpportunityRepository:
+        return OpportunityRepository(self.db)
 
     @cached_property
     def runtime_config(self) -> RuntimeConfigService:
@@ -284,6 +328,50 @@ class Container:
             ttl_seconds=self.settings.session.ttl_seconds,
             reuse_leeway_seconds=self.settings.session.reuse_leeway_seconds,
         )
+
+    @cached_property
+    def grants(self) -> GrantService:
+        from zeus_platform_core.services.grant_service import GrantService
+
+        return GrantService(
+            opportunities=self.opportunities,
+            jobs=self.jobs,
+            entitlements=self.entitlements,
+            db=self.db,
+        )
+
+    def build_worker(self, *, kinds: list[str] | None = None):
+        """A worker bound to this container.
+
+        Not cached: each call returns a worker with its own identity, so two
+        concurrent HTTP drains cannot claim jobs under the same worker id and
+        overwrite each other's leases.
+
+        Importing the job modules is what registers the handlers, so it must
+        happen before any claim -- a worker with an empty registry would dequeue
+        real jobs and immediately fail them as unknown kinds.
+        """
+        from zeus_service_kit.worker import Worker
+
+        from zeus_platform_core.services import (  # noqa: F401 - registers handlers
+            enrichment_jobs,
+            grant_jobs,
+        )
+        from zeus_platform_core.services.job_handlers import registry
+
+        return Worker(jobs=self.jobs, container=self, handlers=registry, kinds=kinds)
+
+    @cached_property
+    def enrichment(self):
+        """The LLM enrichment agent.
+
+        Built lazily and only reached from queued jobs. Nothing on a request
+        path may touch this: a user pressing "scan" waits on a 400 ms SQL
+        query, never on a model.
+        """
+        from zeus_platform_core.services.grant_enrichment import GrantEnrichmentAgent
+
+        return GrantEnrichmentAgent(settings=self._effective, db=self.db)
 
     @cached_property
     def billing(self) -> BillingService:

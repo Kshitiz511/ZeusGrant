@@ -17,6 +17,21 @@ dependencies = [
     "zeus-service-kit",
     "zeus-platform-core",
     "zeus-contract-compliance",
+    # Enrichment runs on the same Vercel function as everything else, because
+    # serverless has no long-lived worker process -- the queue wakes the
+    # function and it drains its own ledger. So "the worker installs this, the
+    # API does not" is not a distinction production can make. Left out, the
+    # import inside the enrichment handler fails and the feature is dead in
+    # production while passing every test locally.
+    "pydantic-ai-slim[openai]>=0.0.30",
+]
+
+[project.optional-dependencies]
+# MCP stays optional: the grants MCP server genuinely is its own process and is
+# never reached from the function, so shipping it would enlarge every cold
+# start for nothing.
+ai = [
+    "mcp>=1.2.0",
 ]
 
 [tool.uv.workspace]

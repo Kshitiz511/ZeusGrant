@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { ChevronRight, CreditCard, LogOut, Lock, Settings } from "lucide-react";
 import { Logo } from "@/components/brand/Logo";
 import { useAuth } from "@/lib/auth";
-import { useModuleAccess } from "@/lib/hooks";
+import { useActiveModules } from "@/lib/hooks";
 import { MODULES } from "@/lib/modules";
 import { cn } from "@/lib/utils";
 
@@ -28,11 +28,15 @@ export function AppShell({
   children: ReactNode;
 }) {
   const { identity, logout } = useAuth();
-  const { hasAccess } = useModuleAccess();
+  const { active: activeIds } = useActiveModules();
 
-  const isActive = (id: string) => (id === "contract_compliance" ? hasAccess : false);
-  const activeModules = MODULES.filter((m) => isActive(m.id));
-  const lockedModules = MODULES.filter((m) => !isActive(m.id));
+  // Status is checked as well as entitlement. A service with no routes behind
+  // it must not produce nav even if a subscription exists for it, or the
+  // sidebar offers pages that cannot load.
+  const isLive = (m: (typeof MODULES)[number]) =>
+    m.status === "available" && activeIds.has(m.id);
+  const activeModules = MODULES.filter(isLive);
+  const lockedModules = MODULES.filter((m) => !isLive(m));
 
   const navButton = (
     key: string,

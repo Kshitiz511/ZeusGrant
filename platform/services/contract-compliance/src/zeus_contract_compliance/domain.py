@@ -8,7 +8,22 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+#: Must match a row in platform.modules. Jobs carry it so queue depth, AI
+#: spend and SLA are answerable per service rather than pooled.
 MODULE_ID = "contract_compliance"
+
+#: QStash topic whose URL group points at this module's drain endpoint
+#: (``POST /api/cc/internal/jobs/run``). One topic per module, so a service is
+#: woken only for its own work.
+#:
+#: Defined here rather than beside the handlers because the container needs it
+#: to build the ledger, and the handlers import the container. Keeping it with
+#: the module identity breaks that cycle.
+WAKE_TOPIC = "contract-compliance-worker"
+
+#: Job kind for queued analysis. Namespaced by module so migration 0012's
+#: backfill and any future routing can classify it without guessing.
+ANALYZE_KIND = "contract.analyze"
 
 
 class ContractStatus(StrEnum):

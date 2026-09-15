@@ -31,8 +31,20 @@ _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 16384, 8, 1
 
 log = logging.getLogger(__name__)
 
-TRIAL_MODULE = "contract_compliance"
-TRIAL_PLAN = "cc_starter"
+#: Starter trial, one entry per service that is actually built.
+#:
+#: Each service is sold on its own, so each gets its own subscription row
+#: rather than one blanket grant. That keeps the shape identical to a paying
+#: customer's -- cancelling Grant Intelligence leaves Contract Compliance
+#: untouched -- and it is why this is a list rather than a flag.
+#:
+#: ``audit_compliance`` is deliberately absent. It has plans and a catalogue
+#: row but no service behind it, so trialling it would hand every new customer
+#: a product that does not exist.
+TRIAL_PLANS: tuple[tuple[str, str], ...] = (
+    ("contract_compliance", "cc_starter"),
+    ("grant_intelligence", "gi_starter"),
+)
 
 
 class AuthError(Exception):
@@ -129,15 +141,8 @@ class AuthService:
             tenant_name=workspace_name or f"{full_name.split()[0]}'s Workspace",
         )
 
-        # Start a Contract Compliance trial so the console isn't an empty shell.
-        await self._subscriptions.upsert(
-            tenant_id=tenant.id,
-            module_id=TRIAL_MODULE,
-            plan_id=TRIAL_PLAN,
-            status=SubscriptionStatus.trialing,
-            stripe_subscription_id=None,
-        )
-        await self._entitlements.refresh(tenant.id)
+        # Start a trial of each service so the console isn't an empty shell.
+        await self._start_trials(tenant.id)
 
         return await self._session_payload(user_id, email)
 
@@ -227,16 +232,26 @@ class AuthService:
         tenant = await self._tenancy.provision_tenant(
             user_id=user_id, email=email, tenant_name=f"{first_name}'s Workspace"
         )
-        await self._subscriptions.upsert(
-            tenant_id=tenant.id,
-            module_id=TRIAL_MODULE,
-            plan_id=TRIAL_PLAN,
-            status=SubscriptionStatus.trialing,
-            stripe_subscription_id=None,
-        )
-        await self._entitlements.refresh(tenant.id)
+        await self._start_trials(tenant.id)
 
         return await self._session_payload(user_id, email)
+
+    async def _start_trials(self, tenant_id: str) -> None:
+        """Open a starter trial on every service for a brand-new workspace.
+
+        Entitlements are refreshed once at the end rather than per module: the
+        refresh recomputes the whole tenant either way, so calling it inside
+        the loop would repeat the same work for each service.
+        """
+        for module_id, plan_id in TRIAL_PLANS:
+            await self._subscriptions.upsert(
+                tenant_id=tenant_id,
+                module_id=module_id,
+                plan_id=plan_id,
+                status=SubscriptionStatus.trialing,
+                stripe_subscription_id=None,
+            )
+        await self._entitlements.refresh(tenant_id)
 
     async def session_for_user(self, user_id: str) -> dict:
         """Mint a session payload for an already-authenticated user.

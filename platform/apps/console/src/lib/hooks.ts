@@ -1,10 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 import { api } from "./api";
 import { useAuth } from "./auth";
+import type { ModuleId } from "./modules";
 import type {
   CreateContractInput,
   CreateObligationInput,
   ObligationStatus,
+  OrgProfileInput,
   UpdateContractInput,
   UpdateObligationInput,
 } from "./types";
@@ -14,7 +17,14 @@ import type {
 // This cuts redundant calls to the (serverless, pay-per-invoke) backend — the
 // cost-effective default. staleTime is generous for lists that rarely change.
 
-const MODULE_ID = "contract_compliance";
+/**
+ * Subscription states that still grant access.
+ *
+ * ``past_due`` counts: cutting a customer off the moment a card fails loses
+ * their work over a billing problem they can usually fix in a minute. Billing
+ * chases the payment; the product keeps working.
+ */
+const USABLE = ["active", "trialing", "past_due"];
 
 export function useEntitlements() {
   const { getToken, identity } = useAuth();
@@ -26,24 +36,43 @@ export function useEntitlements() {
   });
 }
 
-export function useModuleAccess() {
+/** Whether this tenant may use one specific service. */
+export function useModuleAccess(moduleId: ModuleId) {
   const { data, isLoading } = useEntitlements();
-  const ent = data?.modules?.[MODULE_ID];
+  const ent = data?.modules?.[moduleId];
   return {
-    hasAccess: !!ent && ["active", "trialing", "past_due"].includes(ent.status),
+    hasAccess: !!ent && USABLE.includes(ent.status),
     status: ent?.status ?? null,
     limits: ent?.limits ?? null,
     isLoading,
   };
 }
 
+/**
+ * Access for every module at once.
+ *
+ * The sidebar has to ask about all of them, and hooks cannot be called in a
+ * loop, so this reads the one entitlements response and reduces it to a set.
+ */
+export function useActiveModules() {
+  const { data, isLoading } = useEntitlements();
+  const active = new Set<ModuleId>();
+  for (const [id, ent] of Object.entries(data?.modules ?? {})) {
+    if (USABLE.includes(ent.status)) active.add(id as ModuleId);
+  }
+  return { active, isLoading };
+}
+
 export function useContracts() {
   const { getToken, identity } = useAuth();
+  // Services are sold separately, so a tenant without this one should not be
+  // issuing requests to it at all.
+  const { hasAccess } = useModuleAccess("contract_compliance");
   return useQuery({
     queryKey: ["contracts", identity?.tenantId],
     queryFn: () => api.listContracts(getToken),
     staleTime: 30_000,
-    enabled: !!identity,
+    enabled: !!identity && hasAccess,
   });
 }
 
@@ -264,4 +293,124 @@ export function useOpenPortal() {
       window.location.assign(url);
     },
   });
+}
+
+// --- grant intelligence -----------------------------------------------------
+
+export function useOrgProfile() {
+  const { getToken, identity } = useAuth();
+  return useQuery({
+    queryKey: ["org-profile", identity?.tenantId],
+    queryFn: () => api.getProfile(getToken),
+    enabled: !!identity,
+    staleTime: 60_000,
+  });
+}
+
+export function useSaveProfile() {
+  const { getToken, identity } = useAuth();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: OrgProfileInput) => api.saveProfile(input, getToken),
+    onSuccess: (profile) => {
+      qc.setQueryData(["org-profile", identity?.tenantId], profile);
+      // Saving a scoring field queues a rescore server-side, so what is on
+      // screen is now one scan out of date.
+      qc.invalidateQueries({ queryKey: ["matches", identity?.tenantId] });
+      qc.invalidateQueries({ queryKey: ["match-summary", identity?.tenantId] });
+    },
+  });
+}
+
+export function useEligibilityCodes() {
+  const { getToken, identity } = useAuth();
+  return useQuery({
+    queryKey: ["eligibility-codes"],
+    queryFn: () => api.eligibilityCodes(getToken),
+    enabled: !!identity,
+    // A fixed reference table. Refetching it is pure waste.
+    staleTime: Infinity,
+  });
+}
+
+export function useMatches(params: { minScore?: number; savedOnly?: boolean } = {}) {
+  const { getToken, identity } = useAuth();
+  return useQuery({
+    queryKey: ["matches", identity?.tenantId, params.minScore ?? 0, !!params.savedOnly],
+    queryFn: () => api.listMatches(params, getToken),
+    enabled: !!identity,
+    // Matches only change when a scan runs, and a scan invalidates this key
+    // itself, so polling for them would be pointless load.
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useMatchSummary() {
+  const { getToken, identity } = useAuth();
+  return useQuery({
+    queryKey: ["match-summary", identity?.tenantId],
+    queryFn: () => api.matchSummary(getToken),
+    enabled: !!identity,
+    staleTime: 60_000,
+  });
+}
+
+export function useSetMatchState() {
+  const { getToken, identity } = useAuth();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { opportunityId: string; saved?: boolean; dismissed?: boolean }) =>
+      api.setMatchState(v.opportunityId, { saved: v.saved, dismissed: v.dismissed }, getToken),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["matches", identity?.tenantId] });
+      qc.invalidateQueries({ queryKey: ["match-summary", identity?.tenantId] });
+    },
+  });
+}
+
+export function useRequestScan() {
+  const { getToken } = useAuth();
+  return useMutation({ mutationFn: () => api.requestScan(getToken) });
+}
+
+/**
+ * Follow a scan to completion.
+ *
+ * Polls only while the job is live, then stops. A fixed interval that never
+ * turned itself off would keep calling a pay-per-invoke backend forever on any
+ * tab left open, which is the expensive version of this mistake.
+ *
+ * On completion the match queries are invalidated once, so the list refreshes
+ * exactly when there is something new to show rather than on a timer.
+ */
+export function useScanProgress(jobId: string | null) {
+  const { getToken, identity } = useAuth();
+  const qc = useQueryClient();
+  const settled = useRef(false);
+
+  const query = useQuery({
+    queryKey: ["scan", jobId],
+    queryFn: () => api.scanStatus(jobId!, getToken),
+    enabled: !!jobId,
+    refetchInterval: (q) => {
+      const s = q.state.data?.status;
+      return s === "queued" || s === "running" ? 2000 : false;
+    },
+  });
+
+  const status = query.data?.status;
+  useEffect(() => {
+    if (!jobId) {
+      settled.current = false;
+      return;
+    }
+    if (settled.current) return;
+    if (status === "succeeded" || status === "failed" || status === "cancelled") {
+      settled.current = true;
+      qc.invalidateQueries({ queryKey: ["matches", identity?.tenantId] });
+      qc.invalidateQueries({ queryKey: ["match-summary", identity?.tenantId] });
+    }
+  }, [status, jobId, qc, identity?.tenantId]);
+
+  return query;
 }

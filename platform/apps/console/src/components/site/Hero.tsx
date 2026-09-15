@@ -1,4 +1,5 @@
-import { ArrowRight, CalendarClock, FileText, Sparkles } from "lucide-react";
+import { useState } from "react";
+import { ArrowRight, CalendarClock, FileText, Sparkles, Target } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useParallax } from "@/lib/motion";
 import { cn } from "@/lib/utils";
@@ -70,19 +71,18 @@ export function Hero({ onNavigate }: { onNavigate: (to: string) => void }) {
             className="animate-fade-up mt-7 text-balance text-4xl font-extrabold leading-[1.05] tracking-tight text-ink sm:text-5xl md:text-6xl lg:text-[4.25rem]"
             style={{ animationDelay: "80ms" }}
           >
-            Every obligation.
+            Win the funding.
             <br />
-            Every deadline.{" "}
-            <span className="text-gradient-brand">Tracked.</span>
+            Then <span className="text-gradient-brand">prove you delivered.</span>
           </h1>
 
           <p
             className="animate-fade-up mx-auto mt-6 max-w-xl text-pretty text-base leading-relaxed text-muted-foreground sm:text-lg"
             style={{ animationDelay: "160ms" }}
           >
-            Upload an award agreement and Zeus reads it the way a compliance officer
-            would — pulling out every obligation, deadline and financial term, with the
-            exact contract language behind each one.
+            Zeus is two services on one platform. Grant Intelligence scores every open
+            opportunity against your profile. Contract Compliance reads the agreement you
+            signed and tracks every obligation in it. Buy either one on its own.
           </p>
 
           <div
@@ -116,20 +116,20 @@ export function Hero({ onNavigate }: { onNavigate: (to: string) => void }) {
           </p>
         </div>
 
-        {/* Product preview. A real representation of the obligations view rather
-            than a stock screenshot, so the promise above is legible. */}
+        {/* Product preview. Real representations of both live services rather
+            than stock screenshots, so the promise above is legible. */}
         <div
           className="animate-fade-up mt-16 sm:mt-20"
           style={{ animationDelay: "380ms" }}
         >
-          <ObligationPreview offset={slow} />
+          <ProductPreview offset={slow} />
         </div>
       </div>
     </section>
   );
 }
 
-const SAMPLE = [
+const OBLIGATIONS = [
   {
     title: "Submit quarterly financial report",
     due: "Mar 31",
@@ -156,55 +156,170 @@ const SAMPLE = [
   },
 ];
 
-function ObligationPreview({ offset }: { offset: number }) {
+/**
+ * Sample matches.
+ *
+ * The reasons are shown because that is the actual product: the score is not
+ * the feature, the fact that you can see where it came from is. A preview that
+ * showed only a number would be advertising the thing we deliberately did not
+ * build.
+ */
+const MATCHES = [
+  {
+    title: "Community Health Infrastructure Program",
+    agency: "HHS · HRSA",
+    score: 92,
+    reasons: ["Eligibility match", "Operates in TX", "Award fits range"],
+  },
+  {
+    title: "Rural Broadband Equity Initiative",
+    agency: "USDA · Rural Development",
+    score: 78,
+    reasons: ["Focus area match", "Open 41 days"],
+  },
+  {
+    title: "Youth Workforce Development Grant",
+    agency: "DOL · ETA",
+    score: 64,
+    reasons: ["Population served", "Cost share required"],
+  },
+];
+
+/**
+ * A preview of both live services.
+ *
+ * Tabbed rather than stacked: the two services are peers, and showing one
+ * above the other would re-create the impression that the platform is one
+ * product with an extra feature.
+ */
+function ProductPreview({ offset }: { offset: number }) {
+  const [tab, setTab] = useState<"matches" | "obligations">("matches");
+
   return (
     <div
       className="glass-strong relative mx-auto max-w-4xl rounded-[1.75rem] p-2.5 sm:p-3"
       style={{ transform: `translate3d(0, ${-offset * 0.35}px, 0)` }}
     >
       <div className="overflow-hidden rounded-[1.35rem] border border-border/60 bg-background">
-        {/* Window chrome. */}
+        {/* Window chrome doubling as the service switch. */}
         <div className="flex items-center gap-2 border-b border-border/70 bg-muted/50 px-4 py-3">
-          <span className="size-2.5 rounded-full bg-destructive/30" />
-          <span className="size-2.5 rounded-full bg-warning/40" />
-          <span className="size-2.5 rounded-full bg-success/40" />
-          <div className="ml-3 flex min-w-0 items-center gap-2 text-xs font-medium text-muted-foreground">
-            <FileText className="size-3.5 shrink-0" />
-            <span className="truncate">Sample award agreement</span>
+          <span className="hidden size-2.5 rounded-full bg-destructive/30 sm:inline-block" />
+          <span className="hidden size-2.5 rounded-full bg-warning/40 sm:inline-block" />
+          <span className="hidden size-2.5 rounded-full bg-success/40 sm:inline-block" />
+          <div className="flex min-w-0 items-center gap-1 sm:ml-3">
+            <PreviewTab active={tab === "matches"} onClick={() => setTab("matches")} icon={Target}>
+              Matches
+            </PreviewTab>
+            <PreviewTab
+              active={tab === "obligations"}
+              onClick={() => setTab("obligations")}
+              icon={FileText}
+            >
+              Obligations
+            </PreviewTab>
           </div>
           <span className="ml-auto inline-flex shrink-0 items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-1 text-[11px] font-semibold text-primary">
             Example
           </span>
         </div>
 
-        <ul className="divide-y divide-border/60">
-          {SAMPLE.map((o) => (
-            <li
-              key={o.title}
-              className="flex items-start gap-3 px-4 py-3.5 text-left transition-colors duration-200 hover:bg-muted/40 sm:px-5"
-            >
-              <span
-                className={cn(
-                  "mt-1.5 size-2 shrink-0 rounded-full",
-                  o.tone === "high"
-                    ? "bg-destructive"
-                    : o.tone === "medium"
-                      ? "bg-warning"
-                      : "bg-success",
-                )}
-              />
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-semibold text-ink">{o.title}</p>
-                <p className="mt-0.5 truncate text-xs text-muted-foreground">{o.clause}</p>
-              </div>
-              <span className="ml-2 inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-[11px] font-semibold text-muted-foreground">
-                <CalendarClock className="size-3" />
-                {o.due}
-              </span>
-            </li>
-          ))}
-        </ul>
+        {tab === "matches" ? <MatchRows /> : <ObligationRows />}
       </div>
     </div>
+  );
+}
+
+function PreviewTab({
+  active,
+  onClick,
+  icon: Icon,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: typeof FileText;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors duration-200",
+        active
+          ? "bg-background text-ink shadow-soft"
+          : "text-muted-foreground hover:text-ink",
+      )}
+    >
+      <Icon className="size-3.5 shrink-0" />
+      {children}
+    </button>
+  );
+}
+
+function MatchRows() {
+  return (
+    <ul className="divide-y divide-border/60">
+      {MATCHES.map((m) => (
+        <li
+          key={m.title}
+          className="flex items-start gap-3 px-4 py-3.5 text-left transition-colors duration-200 hover:bg-muted/40 sm:px-5"
+        >
+          <span
+            className={cn(
+              "mt-0.5 inline-flex shrink-0 items-center justify-center rounded-lg px-2 py-1 text-xs font-extrabold",
+              m.score >= 75 ? "bg-primary/12 text-primary" : "bg-muted text-muted-foreground",
+            )}
+          >
+            {m.score}
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-semibold text-ink">{m.title}</p>
+            <p className="mt-0.5 truncate text-xs text-muted-foreground">{m.agency}</p>
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              {m.reasons.map((r) => (
+                <span
+                  key={r}
+                  className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground"
+                >
+                  {r}
+                </span>
+              ))}
+            </div>
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function ObligationRows() {
+  return (
+    <ul className="divide-y divide-border/60">
+      {OBLIGATIONS.map((o) => (
+        <li
+          key={o.title}
+          className="flex items-start gap-3 px-4 py-3.5 text-left transition-colors duration-200 hover:bg-muted/40 sm:px-5"
+        >
+          <span
+            className={cn(
+              "mt-1.5 size-2 shrink-0 rounded-full",
+              o.tone === "high"
+                ? "bg-destructive"
+                : o.tone === "medium"
+                  ? "bg-warning"
+                  : "bg-success",
+            )}
+          />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-semibold text-ink">{o.title}</p>
+            <p className="mt-0.5 truncate text-xs text-muted-foreground">{o.clause}</p>
+          </div>
+          <span className="ml-2 inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-[11px] font-semibold text-muted-foreground">
+            <CalendarClock className="size-3" />
+            {o.due}
+          </span>
+        </li>
+      ))}
+    </ul>
   );
 }

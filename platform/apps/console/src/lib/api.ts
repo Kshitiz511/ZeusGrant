@@ -17,11 +17,19 @@ import type {
   ContractDocument,
   CreateContractInput,
   CreateObligationInput,
+  EligibilityCode,
   Entitlements,
+  JobStatus,
+  MatchPage,
+  MatchSummary,
   Obligation,
   ObligationStatus,
   ObligationWithContract,
+  OrgProfile,
+  OrgProfileInput,
   PlanOption,
+  ScanRequest,
+  ScanUsage,
   SessionResponse,
   TokenResponse,
   UpdateContractInput,
@@ -341,4 +349,79 @@ export const api = {
       },
       getToken,
     ),
+
+  // --- grant intelligence ---
+
+  /** Null until the tenant has saved a profile, which is a normal first-run state. */
+  getProfile: (getToken: TokenGetter) =>
+    request<OrgProfile | null>(`${CORE}/grants/profile`, {}, getToken),
+
+  /**
+   * Partial update. Only the keys sent are changed, so an autosaving form can
+   * send one field without clearing the rest. Saving a field that feeds
+   * scoring queues a rescore server-side.
+   */
+  saveProfile: (input: OrgProfileInput, getToken: TokenGetter) =>
+    request<OrgProfile>(
+      `${CORE}/grants/profile`,
+      { method: "PUT", body: JSON.stringify(input) },
+      getToken,
+    ),
+
+  eligibilityCodes: async (getToken: TokenGetter) => {
+    const res = await request<{ codes: EligibilityCode[] }>(
+      `${CORE}/grants/eligibility-codes`,
+      {},
+      getToken,
+    );
+    return res.codes;
+  },
+
+  /**
+   * Precomputed matches, read from stored rows.
+   *
+   * This never scores anything: the scan job wrote these rows already, so a
+   * page load is an indexed read rather than a pass over the whole catalogue.
+   */
+  listMatches: (
+    params: { minScore?: number; savedOnly?: boolean; limit?: number; offset?: number },
+    getToken: TokenGetter,
+  ) => {
+    const q = new URLSearchParams();
+    if (params.minScore) q.set("min_score", String(params.minScore));
+    if (params.savedOnly) q.set("saved_only", "true");
+    q.set("limit", String(params.limit ?? 50));
+    q.set("offset", String(params.offset ?? 0));
+    return request<MatchPage>(`${CORE}/grants/matches?${q}`, {}, getToken);
+  },
+
+  matchSummary: (getToken: TokenGetter) =>
+    request<MatchSummary>(`${CORE}/grants/matches/summary`, {}, getToken),
+
+  setMatchState: (
+    opportunityId: string,
+    state: { saved?: boolean; dismissed?: boolean },
+    getToken: TokenGetter,
+  ) =>
+    request<Record<string, unknown>>(
+      `${CORE}/grants/matches/${opportunityId}/state`,
+      { method: "POST", body: JSON.stringify(state) },
+      getToken,
+    ),
+
+  /**
+   * Queue a scan. 202 with a job id; the work happens off the request path.
+   *
+   * Throws ApiError 402 when the plan's monthly scans are exhausted and 409
+   * when the profile cannot produce a score yet. Both are expected states with
+   * a clear next action, not faults.
+   */
+  requestScan: (getToken: TokenGetter) =>
+    request<ScanRequest>(`${CORE}/grants/scan`, { method: "POST" }, getToken),
+
+  scanStatus: (jobId: string, getToken: TokenGetter) =>
+    request<JobStatus>(`${CORE}/grants/scan/${jobId}`, {}, getToken),
+
+  scanUsage: (getToken: TokenGetter) =>
+    request<ScanUsage>(`${CORE}/grants/usage`, {}, getToken),
 };

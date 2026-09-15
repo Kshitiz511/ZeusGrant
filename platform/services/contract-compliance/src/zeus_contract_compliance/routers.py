@@ -30,6 +30,11 @@ from fastapi import (
 )
 from zeus_service_kit.security import ActorDep, require_module
 
+from zeus_contract_compliance.analysis import (
+    ContractHasNoText,
+    ContractNotFound,
+)
+from zeus_contract_compliance.analysis import analyze_contract as _analyze
 from zeus_contract_compliance.container import Container
 from zeus_contract_compliance.documents import (
     ALLOWED_EXTENSIONS,
@@ -37,6 +42,7 @@ from zeus_contract_compliance.documents import (
     UnsupportedDocumentError,
 )
 from zeus_contract_compliance.domain import (
+    ANALYZE_KIND,
     MODULE_ID,
     AuditEntry,
     Contract,
@@ -53,7 +59,6 @@ from zeus_contract_compliance.ingestion import (
     DuplicateDocumentError,
     UploadTooLargeError,
 )
-from zeus_contract_compliance.jobs import ANALYZE_TOPIC
 
 router = APIRouter(prefix="/contracts", tags=["contracts"])
 obligations_router = APIRouter(prefix="/obligations", tags=["obligations"])
@@ -509,9 +514,10 @@ async def analyze_contract(
     """Run AI extraction over the contract body and persist the obligations.
 
     Sync (default): extract inline and return the obligations.
-    Async (``?async_mode=true``): enqueue the job and return 202 immediately;
-    the queue calls back into ``/internal/jobs/analyze`` to do the work. This
-    keeps request latency low for large contracts and slow models.
+    Async (``?async_mode=true``): record the job and return 202 with a job id
+    in the ``X-Job-Id`` header for the client to poll. This keeps request
+    latency low for large contracts and slow models, and is the only viable
+    path on a platform with a 60-second function limit.
 
     Re-running replaces only untouched AI obligations, so human progress and
     manually authored items survive a re-analysis.
@@ -525,8 +531,17 @@ async def analyze_contract(
         )
 
     if async_mode:
-        await container.queue.publish(
-            ANALYZE_TOPIC, {"tenant_id": tenant_id, "contract_id": contract_id}
+        # Keyed on the contract, so a double-clicked button collapses into the
+        # one job already in flight instead of starting a second analysis that
+        # would delete the first one's obligations halfway through writing
+        # them. The key frees up once the job finishes, so a deliberate
+        # re-analysis later still works.
+        job = await container.jobs.enqueue(
+            ANALYZE_KIND,
+            payload={"tenant_id": tenant_id, "contract_id": contract_id},
+            tenant_id=tenant_id,
+            idempotency_key=f"analyze:{tenant_id}:{contract_id}",
+            priority=10,  # a user is waiting: ahead of every scheduled job
         )
         await _audit(
             container,
@@ -535,65 +550,36 @@ async def analyze_contract(
             action="contract.analyze_queued",
             entity_type="contract",
             entity_id=contract_id,
+            detail={"job_id": job.id, "deduplicated": job.attempts > 0},
         )
         response.status_code = status.HTTP_202_ACCEPTED
+        response.headers["X-Job-Id"] = job.id
         return []
 
-    removed = await container.obligations.delete_ai_for_contract(tenant_id, contract_id)
     try:
-        result = await container.extraction.extract_detailed(contract.body or "")
-    except Exception as exc:
-        # A failed extraction still consumed budget and is the signal that
-        # something is wrong, so it is recorded before the error propagates.
-        # This must go to the same ledger as the success path -- splitting them
-        # would make every rollup report a 100% success rate by construction.
-        await container.metering.record(
+        result = await _analyze(
+            container,
             tenant_id=tenant_id,
+            contract_id=contract_id,
             actor_id=actor_id,
-            module_id="contract_compliance",
-            operation="extract_obligations",
-            model=container.settings.llm.model,
-            succeeded=False,
-            error=str(exc),
+            via="request",
         )
+    except (ContractNotFound, ContractHasNoText):
+        # Both were already ruled out above, so reaching here means the
+        # contract changed underneath this request.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This contract changed while it was being analysed. Try again.",
+        ) from None
+    except Exception as exc:
+        # The spend was already recorded by _analyze before it re-raised, so
+        # this only has to translate the fault into something a user can act on.
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="AI analysis is temporarily unavailable. Please try again shortly.",
         ) from exc
 
-    drafts = result.obligations
-    await container.obligations.bulk_insert_ai(
-        tenant_id=tenant_id, contract_id=contract_id, drafts=drafts
-    )
-    await container.contracts.mark_analyzed(tenant_id, contract_id)
-    await container.metering.record(
-        tenant_id=tenant_id,
-        actor_id=actor_id,
-        module_id="contract_compliance",
-        operation="extract_obligations",
-        model=result.model,
-        prompt_tokens=result.prompt_tokens,
-        completion_tokens=result.completion_tokens,
-        latency_ms=result.latency_ms,
-        succeeded=result.chunks_failed < result.chunks,
-    )
-
-    await _audit(
-        container,
-        tenant_id=tenant_id,
-        actor_id=actor_id,
-        action="contract.analyzed",
-        entity_type="contract",
-        entity_id=contract_id,
-        detail={
-            "obligations_created": len(drafts),
-            "stale_removed": removed,
-            "model": result.model,
-            "chunks": result.chunks,
-            "chunks_failed": result.chunks_failed,
-        },
-    )
-    return await container.obligations.list_for_contract(tenant_id, contract_id)
+    return await container.obligations.list_for_contract(tenant_id, result.contract_id)
 
 
 # --- audit trail ------------------------------------------------------------

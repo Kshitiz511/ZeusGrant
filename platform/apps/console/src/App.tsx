@@ -1,19 +1,21 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Loader2, ShieldCheck } from "lucide-react";
 import { ActivityView } from "@/components/ActivityView";
 import { AppShell } from "@/components/AppShell";
 import { BillingView } from "@/components/BillingView";
 import { ContractDetail } from "@/components/ContractDetail";
 import { ContractsView } from "@/components/ContractsView";
+import { FundingProfileView } from "@/components/FundingProfileView";
 import { LoginView } from "@/components/LoginView";
+import { MatchesView } from "@/components/MatchesView";
 import { SignupView } from "@/components/SignupView";
 import { LandingPage } from "@/components/site/LandingPage";
 import { TasksView } from "@/components/TasksView";
 import { Button } from "@/components/ui/button";
 import { VerifyEmailView } from "@/components/VerifyEmailView";
 import { useAuth } from "@/lib/auth";
-import { useContracts, useModuleAccess } from "@/lib/hooks";
-import { MODULES } from "@/lib/modules";
+import { useActiveModules, useContracts } from "@/lib/hooks";
+import { MODULES, moduleForRoute } from "@/lib/modules";
 import { useRoute } from "@/lib/router";
 import type { Contract } from "@/lib/types";
 
@@ -25,6 +27,15 @@ type View =
   | { kind: "contract"; contractId: string };
 
 const ROUTE_META: Record<string, { title: string; description?: string }> = {
+  "/matches": {
+    title: "Matches",
+    description:
+      "Open funding scored against your profile, with the reasons behind every score.",
+  },
+  "/funding-profile": {
+    title: "Funding profile",
+    description: "What we score opportunities against. The more complete it is, the sharper the matches.",
+  },
   "/compliance": {
     title: "Contract Compliance",
     description:
@@ -89,10 +100,24 @@ function Restoring() {
 }
 
 function Authed({ view, setView }: { view: View; setView: (v: View) => void }) {
-  const { hasAccess, isLoading } = useModuleAccess();
+  const { active, isLoading } = useActiveModules();
   const { data: contracts } = useContracts();
 
   const navigate = (key: string) => setView({ kind: "route", key });
+
+  // The default landing route is Contract Compliance, which is wrong for a
+  // tenant who only bought Grant Intelligence. Once entitlements arrive, move
+  // them to the first service they actually have. Only fires while they are
+  // still on the untouched default, so it never fights a real navigation.
+  const landed = useRef(false);
+  useEffect(() => {
+    if (landed.current || isLoading || active.size === 0) return;
+    landed.current = true;
+    if (view.kind === "route" && view.key === "/compliance" && !active.has("contract_compliance")) {
+      const first = MODULES.find((m) => active.has(m.id));
+      if (first?.nav[0]) setView({ kind: "route", key: first.nav[0].to });
+    }
+  }, [isLoading, active, view, setView]);
   const openContract =
     view.kind === "contract"
       ? contracts?.find((c) => c.id === view.contractId) ?? null
@@ -107,6 +132,11 @@ function Authed({ view, setView }: { view: View; setView: (v: View) => void }) {
         }
       : ROUTE_META[view.key] ?? moduleMeta(view.key);
 
+  // A route no module claims is platform-wide and needs no subscription,
+  // which is what keeps Billing reachable for a tenant who has bought nothing.
+  const owner = view.kind === "contract" ? moduleForRoute("/compliance") : moduleForRoute(view.key);
+  const locked = !!owner && !active.has(owner.id);
+
   return (
     <AppShell
       title={meta.title}
@@ -114,15 +144,19 @@ function Authed({ view, setView }: { view: View; setView: (v: View) => void }) {
       active={activeKey}
       onNavigate={navigate}
     >
-      {view.kind === "contract" ? (
+      {isLoading ? null : locked ? (
+        <NoAccess module={owner!.name} onViewPlans={() => navigate("/billing")} />
+      ) : view.kind === "contract" ? (
         openContract ? (
           <ContractDetail
             contract={openContract}
             onBack={() => setView({ kind: "route", key: "/compliance" })}
           />
         ) : null
-      ) : isLoading ? null : !hasAccess && isModuleRoute(view.key) ? (
-        <NoAccess onViewPlans={() => navigate("/billing")} />
+      ) : view.key === "/matches" ? (
+        <MatchesView onNavigate={navigate} />
+      ) : view.key === "/funding-profile" ? (
+        <FundingProfileView onNavigate={navigate} />
       ) : view.key === "/compliance" ? (
         <ContractsView
           onOpen={(c: Contract) => setView({ kind: "contract", contractId: c.id })}
@@ -134,20 +168,10 @@ function Authed({ view, setView }: { view: View; setView: (v: View) => void }) {
       ) : view.key === "/billing" ? (
         <BillingView />
       ) : (
-        <ComingSoon onBack={() => navigate("/compliance")} />
+        <ComingSoon onBack={() => navigate("/billing")} />
       )}
     </AppShell>
   );
-}
-
-/**
- * Routes served by the Contract Compliance module, which the plan must cover.
- *
- * Billing is deliberately excluded: a tenant with no entitlement must still be
- * able to reach the page that sells them one.
- */
-function isModuleRoute(key: string): boolean {
-  return ["/compliance", "/my-tasks", "/activity"].includes(key);
 }
 
 function moduleMeta(key: string): { title: string; description?: string } {
@@ -161,13 +185,14 @@ function moduleMeta(key: string): { title: string; description?: string } {
   return { title: "Zeus Platform" };
 }
 
-function NoAccess({ onViewPlans }: { onViewPlans: () => void }) {
+function NoAccess({ module, onViewPlans }: { module: string; onViewPlans: () => void }) {
   return (
     <div className="rounded-xl border border-dashed border-border p-10 text-center">
       <ShieldCheck className="mx-auto size-8 text-muted-foreground" />
-      <h2 className="mt-3 text-lg font-bold text-foreground">Contract Compliance isn&apos;t enabled</h2>
+      <h2 className="mt-3 text-lg font-bold text-foreground">{module} isn&apos;t enabled</h2>
       <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
-        Your workspace doesn&apos;t have an active entitlement for this module yet.
+        Your workspace doesn&apos;t have an active entitlement for this module yet. Each service is
+        sold on its own, so you only pay for the ones you use.
       </p>
       <Button className="mt-5" onClick={onViewPlans}>
         View plans
@@ -179,13 +204,13 @@ function NoAccess({ onViewPlans }: { onViewPlans: () => void }) {
 function ComingSoon({ onBack }: { onBack: () => void }) {
   return (
     <div className="rounded-xl border border-dashed border-border p-10 text-center">
-      <h2 className="text-lg font-bold text-foreground">Coming soon</h2>
+      <h2 className="text-lg font-bold text-foreground">Nothing here yet</h2>
       <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
-        This area is being migrated to the new platform. In the meantime, everything you need for
-        contract compliance is ready.
+        This page isn&apos;t part of any service you have open. Pick a service from the sidebar, or
+        see what else the platform offers.
       </p>
       <Button variant="outline" className="mt-5" onClick={onBack}>
-        Back to Contract Compliance
+        View plans
       </Button>
     </div>
   );

@@ -11,8 +11,20 @@ dependencies = [
     "uvicorn[standard]>=0.30",
 ]
 
+[project.optional-dependencies]
+# Kept optional so the API image does not carry the model and MCP stacks. The
+# web service never calls either: enrichment runs in the worker, and the MCP
+# server is its own process. Installing them everywhere would enlarge every
+# cold start to no purpose.
+ai = [
+    "pydantic-ai-slim[openai,anthropic]>=0.0.30",
+    "mcp>=1.2.0",
+]
+
 [project.scripts]
 zeus-core = "zeus_platform_core.__main__:main"
+zeus-worker = "zeus_platform_core.worker_main:main"
+zeus-grants-mcp = "zeus_platform_core.mcp_servers.grants_server:main"
 
 [build-system]
 requires = ["hatchling"]

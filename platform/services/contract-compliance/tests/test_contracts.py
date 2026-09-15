@@ -96,6 +96,21 @@ def _build(*, entitled: bool, contracts_max: int | None = 5, contract_count: int
         lambda args: {"n": contract_count},
     )
     db.on_fetch_one(
+        "INSERT INTO platform.jobs",
+        lambda args: {
+            "id": "job-1",
+            "kind": args[0],
+            "module_id": args[1],
+            "payload": args[2],
+            "tenant_id": args[3],
+            "idempotency_key": args[4],
+            "priority": args[5],
+            "max_attempts": args[6],
+            "status": "queued",
+            "attempts": 0,
+        },
+    )
+    db.on_fetch_one(
         "AND id = $2",
         lambda args: {
             "id": "c-1",
@@ -208,6 +223,14 @@ def _usage_inserts(db):
     ]
 
 
+def _job_inserts(db):
+    return [
+        args
+        for kind, query, args in db.calls
+        if "INSERT INTO platform.jobs" in query
+    ]
+
+
 def test_successful_analysis_is_metered_with_real_token_counts():
     client = _build(entitled=True)
     client.post("/contracts/c-1/analyze", headers=_auth())
@@ -243,35 +266,36 @@ def test_failed_analysis_is_metered_to_the_same_ledger():
 
 def test_async_analyze_enqueues_and_returns_202():
     client = _build(entitled=True)
-    container = client.app.state.container
     resp = client.post("/contracts/c-1/analyze?async_mode=true", headers=_auth())
     assert resp.status_code == 202
     assert resp.json() == []
-    # The job was published to the queue for the worker to pick up.
-    published = container.queue.published
-    assert len(published) == 1
-    topic, payload = published[0]
-    assert topic == "contract.analyze"
-    assert payload == {"tenant_id": TENANT, "contract_id": "c-1"}
+    # A pollable job id, not a bare acknowledgement: the client has to be able
+    # to ask whether the work finished.
+    assert resp.headers["X-Job-Id"]
+
+    # The job is recorded in the ledger under this module, which is what makes
+    # it survive a dropped queue message.
+    (args,) = _job_inserts(client.fake_db)
+    assert args[0] == "contract.analyze"
+    assert args[1] == "contract_compliance"
+    assert json.loads(args[2]) == {"tenant_id": TENANT, "contract_id": "c-1"}
+    # Keyed on the contract so a double-clicked button cannot start a second
+    # analysis that deletes the first one's obligations mid-write.
+    assert args[4] == f"analyze:{TENANT}:c-1"
 
 
 def test_worker_endpoint_requires_secret():
     client = _build(entitled=True)
-    # Wrong secret -> 401.
-    bad = client.post(
-        "/internal/jobs/analyze",
-        headers={"X-Worker-Secret": "nope"},
-        json={"tenant_id": TENANT, "contract_id": "c-1"},
-    )
-    assert bad.status_code == 401
+    bad = client.post("/internal/jobs/run", json={"secret": "nope"})
+    assert bad.status_code == 403
 
 
-def test_worker_endpoint_processes_job():
+def test_worker_endpoint_drains_its_own_module():
     client = _build(entitled=True)
-    ok = client.post(
-        "/internal/jobs/analyze",
-        headers={"X-Worker-Secret": "worker-secret"},
-        json={"tenant_id": TENANT, "contract_id": "c-1"},
-    )
+    ok = client.post("/internal/jobs/run", json={"secret": "worker-secret"})
     assert ok.status_code == 200
-    assert ok.json() == {"contract_id": "c-1", "obligations_created": 2}
+    body = ok.json()
+    # A worker only ever drains the module it belongs to, which is what keeps
+    # one service's backlog from delaying another that was sold separately.
+    assert body["module_id"] == "contract_compliance"
+    assert body["jobs_run"] == 0  # nothing queued in this fixture

@@ -6,7 +6,7 @@ import { useScrolledPast } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 
 const LINKS = [
-  { href: "#platform", label: "Platform" },
+  { href: "#platform", label: "Services" },
   { href: "#how", label: "How it works" },
   { href: "#security", label: "Security" },
   { href: "#pricing", label: "Pricing" },
