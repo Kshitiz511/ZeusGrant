@@ -50,16 +50,49 @@ SessionDep = Annotated[Session, Depends(get_session)]
 
 
 async def get_tenant_id(
+    container: ContainerDep,
     session: SessionDep,
     x_tenant_id: Annotated[str | None, Header()] = None,
 ) -> str:
-    """Resolve the active tenant: explicit header wins, else the session claim."""
+    """Resolve the active tenant, and prove the caller belongs to it.
+
+    ``X-Tenant-Id`` exists so someone in several workspaces can switch without
+    re-authenticating. That makes the active tenant caller-supplied input, and
+    it was previously taken at face value: any signed-in user could name any
+    tenant and be served its data.
+
+    Neither of the other two layers catches this. The entitlement guard asks
+    whether *that tenant* bought the module, which it did. RLS pins
+    ``app.current_tenant`` to the value it is handed, so it isolates perfectly
+    to the wrong tenant. Membership is the only layer that can tell the
+    difference, so it is checked here, before anything downstream runs.
+    """
     tenant_id = x_tenant_id or session.tenant_id
     if not tenant_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No tenant context. Provide X-Tenant-Id or a tenant-scoped token.",
         )
+
+    # Only the header needs proving. A tenant id inside the token was put there
+    # by our own signing key, and re-querying it would add a database round
+    # trip to every request to re-learn what we already asserted.
+    if x_tenant_id and x_tenant_id != session.tenant_id:
+        if not session.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This token cannot select a tenant.",
+            )
+        role = await container.tenants.get_membership_role(
+            tenant_id=tenant_id, user_id=session.user_id
+        )
+        if role is None:
+            # 404, not 403: a 403 would confirm the tenant exists and turn this
+            # into a way to enumerate customers.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="No such workspace."
+            )
+
     return tenant_id
 
 

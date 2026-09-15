@@ -25,6 +25,11 @@ _ACCESS_GRANTING = frozenset({"trialing", "active", "past_due"})
 
 _CACHE_PREFIX = "entitlements:"
 
+_MEMBER_PREFIX = "membership:"
+#: Short by design. This is an authorisation decision, so the cost of it being
+#: stale is someone keeping access to a workspace they were just removed from.
+_MEMBER_TTL = 60
+
 _bearer = HTTPBearer(auto_error=False, description="Supabase/GoTrue JWT")
 
 
@@ -61,6 +66,40 @@ class ServiceSecurity:
             "modules": {r["module_id"]: {"status": r["status"]} for r in rows},
         }
 
+    # --- membership ---
+    async def is_member(self, user_id: str, tenant_id: str) -> bool:
+        """Does this user actually belong to this tenant?
+
+        The tenant for a request can be named by an ``X-Tenant-Id`` header, so
+        it is caller-supplied input and has to be proven, not trusted. Row
+        level security cannot do it: RLS pins ``app.current_tenant`` to
+        whatever value it is given and isolates faithfully to that, which
+        protects against a query that forgot its predicate and not at all
+        against a request that names someone else's tenant.
+
+        Cached briefly because it runs on every guarded request. The window is
+        short on purpose: removing somebody from a workspace should take
+        effect while they are still looking at the screen.
+        """
+        key = f"{_MEMBER_PREFIX}{user_id}:{tenant_id}"
+        cached = await self.cache.get(key)
+        if cached is not None:
+            return cached == "1"
+
+        row = await self.db.fetch_one(
+            """
+            SELECT 1 FROM platform.memberships
+             WHERE user_id = $1::uuid AND tenant_id = $2::uuid
+            """,
+            user_id,
+            tenant_id,
+        )
+        member = row is not None
+        # A negative is cached too, so a scripted sweep of tenant ids costs
+        # one query rather than one per attempt.
+        await self.cache.set(key, "1" if member else "0", ttl_seconds=_MEMBER_TTL)
+        return member
+
 
 def _security(request: Request) -> ServiceSecurity:
     sec = getattr(request.app.state, "security", None)
@@ -96,15 +135,47 @@ SessionDep = Annotated[Session, Depends(get_session)]
 
 
 async def get_tenant_id(
+    security: SecurityDep,
     session: SessionDep,
     x_tenant_id: Annotated[str | None, Header()] = None,
 ) -> str:
+    """Resolve the tenant for this request, and prove the caller belongs to it.
+
+    ``X-Tenant-Id`` exists so someone in several workspaces can choose one
+    without re-authenticating. That makes the active tenant caller-supplied
+    input, and it was previously taken at face value: any signed-in user could
+    name any tenant and be served its data.
+
+    Neither of the other two layers catches this. The entitlement guard asks
+    whether *that tenant* bought the module, which it did. RLS pins
+    ``app.current_tenant`` to the value it is handed, so it isolates perfectly
+    to the wrong tenant. Membership is the only layer that can tell the
+    difference, so it is checked here, once, before anything is bound.
+    """
     tenant_id = x_tenant_id or session.tenant_id
     if not tenant_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No tenant context. Provide X-Tenant-Id or a tenant-scoped token.",
         )
+
+    # Only the header needs proving. A tenant id inside the token was put
+    # there by our own signing key and re-querying it would add a database
+    # round trip to every request to re-learn what we already asserted.
+    if x_tenant_id and x_tenant_id != session.tenant_id:
+        if not session.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This token cannot select a tenant.",
+            )
+        if not await security.is_member(session.user_id, tenant_id):
+            # 404, not 403: a 403 would confirm the tenant exists and turn
+            # this endpoint into a way to enumerate customers.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No such workspace.",
+            )
+
     return tenant_id
 
 

@@ -105,6 +105,43 @@ async def main() -> int:
         )
         check(f"contract_compliance: {policies} RLS policies defined", policies >= len(EXPECTED_CC))
 
+        # Schema-agnostic, and deliberately so. The check above names
+        # contract_compliance explicitly, which is why eight tenant-scoped
+        # tables in the platform schema -- org_profiles and
+        # opportunity_matches among them -- sat with no RLS at all and no
+        # build ever said a word. A rule that only inspects the schema
+        # somebody remembered to list is not a rule.
+        #
+        # The invariant: a tenant_id column means the table holds one tenant's
+        # data, so it must have RLS enabled, forced, and a policy. Any new
+        # table anywhere is covered the moment it is created.
+        unprotected = await conn.fetch(
+            """
+            SELECT n.nspname || '.' || c.relname AS name
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE c.relkind = 'r'
+               AND n.nspname IN ('platform', 'contract_compliance')
+               AND EXISTS (
+                   SELECT 1 FROM information_schema.columns col
+                    WHERE col.table_schema = n.nspname
+                      AND col.table_name  = c.relname
+                      AND col.column_name = 'tenant_id'
+               )
+               AND NOT (
+                   c.relrowsecurity
+                   AND c.relforcerowsecurity
+                   AND EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid)
+               )
+             ORDER BY 1
+            """
+        )
+        check(
+            "every tenant-scoped table has RLS enabled, forced, and a policy",
+            not unprotected,
+            f"{[r['name'] for r in unprotected]}",
+        )
+
         role = await conn.fetchval("SELECT 1 FROM pg_roles WHERE rolname = 'zeus_app'")
         check("zeus_app role exists", role == 1)
 

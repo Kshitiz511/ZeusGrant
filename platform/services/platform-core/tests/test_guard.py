@@ -107,3 +107,37 @@ def test_entitlements_me_reports_only_purchased(client):
     body = resp.json()
     assert "grant_intelligence" in body["modules"]
     assert "contract_compliance" not in body["modules"]
+
+
+# --- cross-tenant access --------------------------------------------------
+#
+# X-Tenant-Id lets somebody in several workspaces switch between them, which
+# makes the active tenant caller-supplied input. It was trusted without
+# checking, so any signed-in user could read any tenant by naming it. Neither
+# other layer catches this: the entitlement guard asks whether *that* tenant
+# bought the module, and RLS isolates faithfully to whichever tenant it is
+# handed. Membership is the only thing that can tell the difference.
+
+OTHER_TENANT = "22222222-2222-2222-2222-222222222222"
+
+
+def test_header_naming_a_foreign_tenant_is_refused(client):
+    resp = client.get(
+        "/probe/grant", headers={**_auth(), "X-Tenant-Id": OTHER_TENANT}
+    )
+    # 404 rather than 403, so the response cannot be used to discover which
+    # tenant ids exist.
+    assert resp.status_code == 404
+
+
+def test_foreign_tenant_cannot_be_read_through_entitlements(client):
+    resp = client.get(
+        "/entitlements/me", headers={**_auth(), "X-Tenant-Id": OTHER_TENANT}
+    )
+    assert resp.status_code == 404
+
+
+def test_header_naming_the_session_tenant_still_works(client):
+    """The switching feature must keep working; only the forgery is blocked."""
+    resp = client.get("/probe/grant", headers={**_auth(), "X-Tenant-Id": TENANT})
+    assert resp.status_code == 200
