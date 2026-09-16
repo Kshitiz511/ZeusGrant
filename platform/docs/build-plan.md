@@ -302,10 +302,50 @@ Nav items appear only for `owner`/`admin`. The role must come from the server (`
 Single-member team, zero usage, unknown cost, seat limit reached, invite send failure (Resend down — show the copyable link). Each is a real state today.
 
 ### Exit criteria
-- [ ] All three views render against a live local stack
-- [ ] A member (non-admin) cannot see or reach admin views; direct API calls are refused
-- [ ] Seat-limit-reached path shows a usable message, not a raw 402
-- [ ] `tsc --noEmit` clean, `vite build` clean
+- [ ] All three views render against a live local stack — **not done.** Verified by
+      typecheck, production build, and a string check of the deployed bundle, but not
+      by signing in and looking at them. Do this before relying on the screens.
+- [x] A member (non-admin) cannot see or reach admin views; direct API calls are refused
+      — server side covered by `test_tenancy_routes.py` and `test_usage.py`; nav hiding
+      is cosmetic and gated on `useIsTenantAdmin`
+- [x] Seat-limit-reached path shows a usable message, not a raw 402
+- [x] `tsc --noEmit` clean, `vite build` clean
+
+### DONE — commit `9d2ec86`, deployed and verified in production
+
+**Shipped:** `TeamView.tsx`, `UsageView.tsx`, `SettingsView.tsx`; nav in `AppShell.tsx`
+gated on `useIsTenantAdmin`; routes in `App.tsx` replacing the `/settings` fallthrough;
+`lib/types.ts`, `lib/api.ts`, `lib/hooks.ts`, `lib/format.ts` extended.
+
+**Verified:** 303 tests pass, ruff clean, `vite build` clean, CI and Deploy both green,
+and the deployed bundle was checked by string match for the new views rather than
+trusted on the deploy badge alone.
+
+**Two findings worth carrying forward:**
+
+1. *TypeScript checking a component against my own hand-written types proves nothing
+   about the server.* The usage views were written against a guessed shape — `daily`,
+   `input_tokens`, a wrapped `by_actor` — and compiled clean, because the error was in
+   the types too. It only surfaced when the response models were read directly. Console
+   types are now confirmed field-for-field against `routers/usage.py` and
+   `routers/tenancy.py`, and every request path against the router decorators. Do this
+   check for every future phase that adds endpoints; the compiler will not do it.
+
+2. *`git add -A platform` committed the vendored reference checkouts* (`graphify`,
+   `ponytail`, `ui-ux-pro-max-skill`) as mode-160000 gitlinks that no clone could
+   resolve. Caught before push, commit reset, and the paths are now in
+   `platform/.gitignore` so it cannot recur. They were already excluded from pytest
+   `testpaths` and ruff, but being ignored by tooling is not the same as being ignored
+   by git.
+
+**Knowingly not built** (deferred, not forgotten):
+- "Last active" per member — no column records it; adding one is a migration, and
+  nothing yet needs it.
+- Plan-limit consumption bars on Usage — plan limits are about scan quota
+  (`GET /grants/usage`), a different question from spend. Mixing the two on one screen
+  invites reading a token cost as a quota. Revisit with Phase 7 (guardrails).
+- Password change in Settings — blocked by Q9 (Resend rejects production sends). The
+  view says so plainly rather than offering a form that would strand the user.
 
 ---
 
