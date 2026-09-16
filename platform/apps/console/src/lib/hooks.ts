@@ -6,6 +6,7 @@ import type { ModuleId } from "./modules";
 import type {
   CreateContractInput,
   CreateObligationInput,
+  MemberRole,
   ObligationStatus,
   OrgProfileInput,
   UpdateContractInput,
@@ -413,4 +414,162 @@ export function useScanProgress(jobId: string | null) {
   }, [status, jobId, qc, identity?.tenantId]);
 
   return query;
+}
+
+// --- team -------------------------------------------------------------------
+
+/**
+ * The caller's rank in the active workspace, from the server.
+ *
+ * Deliberately not read from `identity.role`, which was captured when the
+ * tenant token was minted: if an owner demotes someone mid-session, the stale
+ * copy would keep offering them admin screens. Those screens would fail
+ * server-side, which is safe but confusing.
+ */
+export function useMyRole() {
+  const { getToken, identity } = useAuth();
+  return useQuery({
+    queryKey: ["my-role", identity?.tenantId],
+    queryFn: () => api.myRole(getToken),
+    enabled: !!identity,
+    staleTime: 60_000,
+  });
+}
+
+/** True when the caller may administer the workspace. Cosmetic only. */
+export function useIsTenantAdmin() {
+  const { data, isLoading } = useMyRole();
+  return {
+    isAdmin: data?.role === "owner" || data?.role === "admin",
+    isOwner: data?.role === "owner",
+    role: data?.role ?? null,
+    isLoading,
+  };
+}
+
+export function useMembers() {
+  const { getToken, identity } = useAuth();
+  const { isAdmin } = useIsTenantAdmin();
+  return useQuery({
+    queryKey: ["members", identity?.tenantId],
+    queryFn: () => api.listMembers(getToken),
+    // Members is admin-only server-side. Firing it for a plain member would
+    // produce a 403 in the console for no reason.
+    enabled: !!identity && isAdmin,
+    staleTime: 30_000,
+  });
+}
+
+export function useInvites() {
+  const { getToken, identity } = useAuth();
+  const { isAdmin } = useIsTenantAdmin();
+  return useQuery({
+    queryKey: ["invites", identity?.tenantId],
+    queryFn: () => api.listInvites(getToken),
+    enabled: !!identity && isAdmin,
+    staleTime: 30_000,
+  });
+}
+
+export function useSeats() {
+  const { getToken, identity } = useAuth();
+  const { isAdmin } = useIsTenantAdmin();
+  return useQuery({
+    queryKey: ["seats", identity?.tenantId],
+    queryFn: () => api.seats(getToken),
+    enabled: !!identity && isAdmin,
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * Everything a membership change can affect.
+ *
+ * Kept in one place because the failure mode is subtle: removing a member
+ * frees a seat, changes the member list, and may retire a pending invite. Miss
+ * one and the screen contradicts itself -- a seat counter saying "3 of 3" next
+ * to a list of two people.
+ */
+function useTeamInvalidation() {
+  const qc = useQueryClient();
+  const { identity } = useAuth();
+  return () => {
+    const t = identity?.tenantId;
+    qc.invalidateQueries({ queryKey: ["members", t] });
+    qc.invalidateQueries({ queryKey: ["invites", t] });
+    qc.invalidateQueries({ queryKey: ["seats", t] });
+    qc.invalidateQueries({ queryKey: ["my-role", t] });
+  };
+}
+
+export function useChangeRole() {
+  const { getToken } = useAuth();
+  const invalidate = useTeamInvalidation();
+  return useMutation({
+    mutationFn: ({ userId, role }: { userId: string; role: MemberRole }) =>
+      api.changeRole(userId, role, getToken),
+    onSuccess: invalidate,
+  });
+}
+
+export function useRemoveMember() {
+  const { getToken } = useAuth();
+  const invalidate = useTeamInvalidation();
+  return useMutation({
+    mutationFn: (userId: string) => api.removeMember(userId, getToken),
+    onSuccess: invalidate,
+  });
+}
+
+export function useTransferOwnership() {
+  const { getToken } = useAuth();
+  const invalidate = useTeamInvalidation();
+  return useMutation({
+    mutationFn: (userId: string) => api.transferOwnership(userId, getToken),
+    onSuccess: invalidate,
+  });
+}
+
+export function useInviteMember() {
+  const { getToken } = useAuth();
+  const invalidate = useTeamInvalidation();
+  return useMutation({
+    mutationFn: ({ email, role }: { email: string; role: MemberRole }) =>
+      api.invite(email, role, getToken),
+    onSuccess: invalidate,
+  });
+}
+
+export function useRevokeInvite() {
+  const { getToken } = useAuth();
+  const invalidate = useTeamInvalidation();
+  return useMutation({
+    mutationFn: (id: string) => api.revokeInvite(id, getToken),
+    onSuccess: invalidate,
+  });
+}
+
+// --- usage ------------------------------------------------------------------
+
+export function useUsage(days: number) {
+  const { getToken, identity } = useAuth();
+  return useQuery({
+    queryKey: ["usage", identity?.tenantId, days],
+    queryFn: () => api.usage(days, getToken),
+    enabled: !!identity,
+    staleTime: 60_000,
+  });
+}
+
+export function useUsageBySeat(days: number) {
+  const { getToken, identity } = useAuth();
+  const { isAdmin } = useIsTenantAdmin();
+  return useQuery({
+    queryKey: ["usage-by-seat", identity?.tenantId, days],
+    queryFn: () => api.usageBySeat(days, getToken),
+    // Per-seat spend is admin-only: a member seeing the workspace total is
+    // transparency, a member seeing a colleague's is surveillance.
+    enabled: !!identity && isAdmin,
+    staleTime: 60_000,
+  });
 }

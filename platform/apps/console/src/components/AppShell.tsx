@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
-import { ChevronRight, CreditCard, LogOut, Lock, Settings } from "lucide-react";
+import { BarChart3, ChevronRight, CreditCard, LogOut, Lock, Settings, Users } from "lucide-react";
 import { Logo } from "@/components/brand/Logo";
 import { useAuth } from "@/lib/auth";
-import { useActiveModules } from "@/lib/hooks";
+import { useActiveModules, useIsTenantAdmin } from "@/lib/hooks";
 import { MODULES } from "@/lib/modules";
 import { cn } from "@/lib/utils";
 
@@ -29,6 +29,10 @@ export function AppShell({
 }) {
   const { identity, logout } = useAuth();
   const { active: activeIds } = useActiveModules();
+  // Server-supplied, not read off the token: an owner who demotes someone
+  // mid-session should not leave them with admin nav until they sign out.
+  // This only hides links; every route behind them re-checks server-side.
+  const { isAdmin } = useIsTenantAdmin();
 
   // Status is checked as well as entitlement. A service with no routes behind
   // it must not produce nav even if a subscription exists for it, or the
@@ -101,6 +105,8 @@ export function AppShell({
           )}
 
           <div className="border-t border-sidebar-border pt-4">
+            {isAdmin && navButton("/team", "Team", Users, active === "/team")}
+            {navButton("/usage", "Usage", BarChart3, active === "/usage")}
             {navButton("/billing", "Plans & Billing", CreditCard, active === "/billing")}
             {navButton("/settings", "Settings", Settings, active === "/settings")}
           </div>

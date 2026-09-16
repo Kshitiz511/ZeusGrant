@@ -236,3 +236,88 @@ export type EligibilityCode = {
   description: string;
   applicant_class: string | null;
 };
+
+// --- team and membership ----------------------------------------------------
+
+/**
+ * The ranks that mean something. Mirrors the server's ladder: owner > admin >
+ * member. `viewer` exists in the database enum but no screen offers it yet, so
+ * it is deliberately absent rather than half-supported.
+ */
+export type MemberRole = "owner" | "admin" | "member";
+
+export type Member = {
+  user_id: string;
+  email: string;
+  full_name: string | null;
+  role: MemberRole;
+  created_at: string | null;
+};
+
+export type Invite = {
+  id: string;
+  email: string;
+  role: MemberRole;
+  expires_at: string | null;
+  created_at: string | null;
+  invited_by_email: string | null;
+  /**
+   * Present only on creation. Email delivery is unreliable in production right
+   * now, so the admin is handed the link to pass on themselves rather than
+   * being told to wait for a message that may never arrive.
+   */
+  accept_url?: string | null;
+  email_sent?: boolean | null;
+};
+
+export type Seats = {
+  used: number;
+  pending: number;
+  /** `null` means unlimited — the convention used throughout plan limits. */
+  limit: number | null;
+  remaining: number | null;
+};
+
+// --- AI usage ---------------------------------------------------------------
+
+/**
+ * One usage rollup.
+ *
+ * The nullability of `cost_usd` is load-bearing: it means "unknown", never
+ * "free". `unpriced_calls` counts the calls that contributed nothing to the
+ * figure, so an incomplete total can be shown as incomplete instead of as a
+ * confident number that happens to be wrong.
+ */
+export type UsageTotals = {
+  calls: number;
+  failures: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cost_usd: number | null;
+  unpriced_calls: number;
+};
+
+export type ActorUsage = UsageTotals & {
+  actor_id: string | null;
+  email: string | null;
+  full_name: string | null;
+};
+
+export type ModuleUsage = UsageTotals & { module_id: string };
+
+export type UsageDay = {
+  day: string;
+  calls: number;
+  total_tokens: number;
+  cost_usd: number | null;
+  unpriced_calls: number;
+};
+
+export type UsageResponse = {
+  since: string;
+  until: string;
+  totals: UsageTotals;
+  by_module: ModuleUsage[];
+  series: UsageDay[];
+};

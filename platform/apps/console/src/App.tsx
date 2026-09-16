@@ -8,10 +8,13 @@ import { ContractsView } from "@/components/ContractsView";
 import { FundingProfileView } from "@/components/FundingProfileView";
 import { LoginView } from "@/components/LoginView";
 import { MatchesView } from "@/components/MatchesView";
+import { SettingsView } from "@/components/SettingsView";
 import { SignupView } from "@/components/SignupView";
 import { LandingPage } from "@/components/site/LandingPage";
 import { TasksView } from "@/components/TasksView";
+import { TeamView } from "@/components/TeamView";
 import { Button } from "@/components/ui/button";
+import { UsageView } from "@/components/UsageView";
 import { VerifyEmailView } from "@/components/VerifyEmailView";
 import { useAuth } from "@/lib/auth";
 import { useActiveModules, useContracts } from "@/lib/hooks";
@@ -52,6 +55,14 @@ const ROUTE_META: Record<string, { title: string; description?: string }> = {
   "/billing": {
     title: "Plans & Billing",
     description: "Choose a plan for each module, or manage your existing subscription.",
+  },
+  "/team": {
+    title: "Team",
+    description: "Who can get into this workspace, and what they are allowed to do.",
+  },
+  "/usage": {
+    title: "Usage",
+    description: "AI work done for this workspace, and what it cost.",
   },
   "/settings": { title: "Settings", description: "Workspace, security and billing preferences." },
 };
@@ -167,6 +178,12 @@ function Authed({ view, setView }: { view: View; setView: (v: View) => void }) {
         <ActivityView />
       ) : view.key === "/billing" ? (
         <BillingView />
+      ) : view.key === "/team" ? (
+        <TeamView />
+      ) : view.key === "/usage" ? (
+        <UsageView />
+      ) : view.key === "/settings" ? (
+        <SettingsView onNavigate={navigate} />
       ) : (
         <ComingSoon onBack={() => navigate("/billing")} />
       )}

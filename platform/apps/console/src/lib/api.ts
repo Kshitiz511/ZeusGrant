@@ -11,6 +11,7 @@
 // back in a header.
 
 import type {
+  ActorUsage,
   AuditEntry,
   CheckoutSession,
   Contract,
@@ -19,9 +20,12 @@ import type {
   CreateObligationInput,
   EligibilityCode,
   Entitlements,
+  Invite,
   JobStatus,
   MatchPage,
   MatchSummary,
+  Member,
+  MemberRole,
   Obligation,
   ObligationStatus,
   ObligationWithContract,
@@ -30,10 +34,12 @@ import type {
   PlanOption,
   ScanRequest,
   ScanUsage,
+  Seats,
   SessionResponse,
   TokenResponse,
   UpdateContractInput,
   UpdateObligationInput,
+  UsageResponse,
 } from "./types";
 
 const CORE = "/api/core";
@@ -424,4 +430,66 @@ export const api = {
 
   scanUsage: (getToken: TokenGetter) =>
     request<ScanUsage>(`${CORE}/grants/usage`, {}, getToken),
+
+  // --- team -----------------------------------------------------------------
+
+  /**
+   * The caller's rank in the active workspace.
+   *
+   * Asked of the server rather than read from the identity we already hold:
+   * that one was captured when the tenant token was minted and does not change
+   * if an owner demotes you mid-session. This is only ever used to decide what
+   * to render -- every route re-checks server-side, because a hidden button is
+   * not an access control.
+   */
+  myRole: (getToken: TokenGetter) =>
+    request<{ tenant_id: string; role: MemberRole }>(`${CORE}/tenancy/me`, {}, getToken),
+
+  listMembers: (getToken: TokenGetter) =>
+    request<Member[]>(`${CORE}/tenancy/members`, {}, getToken),
+
+  seats: (getToken: TokenGetter) => request<Seats>(`${CORE}/tenancy/seats`, {}, getToken),
+
+  changeRole: (userId: string, role: MemberRole, getToken: TokenGetter) =>
+    request<void>(
+      `${CORE}/tenancy/members/${userId}`,
+      { method: "PATCH", body: JSON.stringify({ role }) },
+      getToken,
+    ),
+
+  removeMember: (userId: string, getToken: TokenGetter) =>
+    request<void>(`${CORE}/tenancy/members/${userId}`, { method: "DELETE" }, getToken),
+
+  transferOwnership: (userId: string, getToken: TokenGetter) =>
+    request<void>(
+      `${CORE}/tenancy/members/transfer`,
+      { method: "POST", body: JSON.stringify({ user_id: userId }) },
+      getToken,
+    ),
+
+  listInvites: (getToken: TokenGetter) =>
+    request<Invite[]>(`${CORE}/tenancy/invites`, {}, getToken),
+
+  /** Throws ApiError 402 when the plan's seats are already taken. */
+  invite: (email: string, role: MemberRole, getToken: TokenGetter) =>
+    request<Invite>(
+      `${CORE}/tenancy/invites`,
+      { method: "POST", body: JSON.stringify({ email, role }) },
+      getToken,
+    ),
+
+  revokeInvite: (id: string, getToken: TokenGetter) =>
+    request<void>(`${CORE}/tenancy/invites/${id}`, { method: "DELETE" }, getToken),
+
+  // --- usage ----------------------------------------------------------------
+
+  /**
+   * AI consumption for the workspace. Distinct from `scanUsage`, which reports
+   * how much of the plan's scan allowance is left -- quota rather than money.
+   */
+  usage: (days: number, getToken: TokenGetter) =>
+    request<UsageResponse>(`${CORE}/usage/me?days=${days}`, {}, getToken),
+
+  usageBySeat: (days: number, getToken: TokenGetter) =>
+    request<ActorUsage[]>(`${CORE}/usage/by-seat?days=${days}`, {}, getToken),
 };

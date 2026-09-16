@@ -32,3 +32,11 @@ out/
 # TS incremental build cache
 *.tsbuildinfo
 .vercel
+
+# Vendored reference checkouts. These are separate git repositories, so a
+# `git add -A` commits them as gitlinks that no clone can resolve and CI
+# cannot check out. They are also excluded from pytest testpaths and ruff.
+/graphify/
+/ponytail/
+/ui-ux-pro-max-skill/
+/.github/prompts/ui-ux-pro-max/
