@@ -215,14 +215,22 @@ def test_a_revoked_flag_stops_being_minted():
 def test_setting_change_is_audited_without_recording_the_value(operator):
     """The value is a credential as often as not, so only the fact is kept.
 
-    Uses a real managed key. An invented one returns 404 before any audit
-    write, which would let this test pass while asserting nothing.
+    Uses a real managed key, because an invented one returns 404 before any
+    audit write and would let this test pass while asserting nothing.
+
+    Deliberately a NON-secret key. Secret keys need a SecretBox, which is
+    configured from the environment -- the first version of this test used
+    llm.openai_api_key, passed locally where that variable is set, and failed
+    in CI where it is not. A test whose result depends on the machine is not
+    testing the code. It also makes the stronger point: put_setting redacts
+    unconditionally, so even a value that was never classified as sensitive
+    stays out of the log.
     """
     client, written = operator
 
     resp = client.put(
-        "/admin/settings/llm.openai_api_key",
-        json={"value": "sk-secret-value"},
+        "/admin/settings/llm.model",
+        json={"value": "sk-looks-like-a-secret"},
         headers=AUTH,
     )
 
@@ -230,9 +238,8 @@ def test_setting_change_is_audited_without_recording_the_value(operator):
     assert len(written) == 1
     recorded = json.dumps([str(a) for a in written[0]])
     assert "setting.update" in recorded
-    assert "llm.openai_api_key" in recorded
-    # The whole point: the key changed, and the log does not hold the secret.
-    assert "sk-secret-value" not in recorded
+    assert "llm.model" in recorded
+    assert "sk-looks-like-a-secret" not in recorded
     assert "changed" in recorded
 
 
