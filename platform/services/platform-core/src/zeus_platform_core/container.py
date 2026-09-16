@@ -55,6 +55,7 @@ from zeus_platform_core.repositories.opportunities import OpportunityRepository
 from zeus_platform_core.repositories.plans import PlanRepository
 from zeus_platform_core.repositories.sessions import SessionRepository
 from zeus_platform_core.repositories.tenants import TenantRepository
+from zeus_platform_core.repositories.usage import UsageRepository
 from zeus_platform_core.services.auth_service import AuthService
 from zeus_platform_core.services.billing_service import BillingService
 from zeus_platform_core.services.entitlements_service import EntitlementsService
@@ -368,6 +369,22 @@ class Container:
         return Worker(jobs=self.jobs, container=self, handlers=registry, kinds=kinds)
 
     @cached_property
+    def metering(self):
+        """The shared AI usage ledger writer.
+
+        Same recorder the module services use, pointed at the same
+        ``platform.ai_usage`` table, so the owner's spend figure is one query
+        rather than a union that grows with each module.
+        """
+        from zeus_service_kit.metering import AiUsageRecorder
+
+        return AiUsageRecorder(self.db)
+
+    @cached_property
+    def usage(self) -> UsageRepository:
+        return UsageRepository(self.db)
+
+    @cached_property
     def enrichment(self):
         """The LLM enrichment agent.
 
@@ -377,7 +394,7 @@ class Container:
         """
         from zeus_platform_core.services.grant_enrichment import GrantEnrichmentAgent
 
-        return GrantEnrichmentAgent(settings=self._effective, db=self.db)
+        return GrantEnrichmentAgent(settings=self._effective, db=self.db, metering=self.metering)
 
     @cached_property
     def billing(self) -> BillingService:

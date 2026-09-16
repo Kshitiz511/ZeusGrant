@@ -227,6 +227,22 @@ Invite template through the existing `EmailSender`. **Note:** Resend is currentl
 
 ## 5. Phase 2 — Usage read path and real cost
 
+> **Status: DONE 2026-09-16.** Migration 0015 applied locally. 303 tests green, ruff clean, and `scripts/probe_usage.py` passes 15/15 against a real database as `zeus_app`. Closed D3, D9; D8 and Q8 resolved below.
+>
+> **Two traps found while building this, both of which would have silently produced wrong numbers.**
+>
+> *Model names disagreed.* Contract extraction recorded `gpt-5-mini`; grant enrichment recorded `openai:gpt-5-mini` (it builds the name as `f"{provider}:{model}"`). `model_pricing` is keyed on the unqualified name, so every enrichment row would have missed the price table and grouped separately in every rollup. `normalise_model()` in `metering.py` now strips the prefix once, before both lookup and insert. Any future caller inherits this; nobody has to remember the convention.
+>
+> *Enrichment has no tenant.* It reads prose for the **shared** opportunity catalogue — every tenant benefits from the same enriched record, and the job carries no tenant context. `ai_usage.tenant_id` was `NOT NULL`, so metering it at all required a decision. Attributing it to whoever triggered the batch would put shared infrastructure cost on one customer's usage page, which is wrong on their screen and wrong in any budget guard built on it. 0015 drops `NOT NULL`; **NULL now means "platform-wide, attributable to no tenant"**. Tenant queries filter on an explicit tenant id and so exclude these by construction.
+>
+> **Q8 answered by measurement, not judgement:** production has **zero** rows in both `platform.ai_usage` and `contract_compliance.ai_usage`. There is nothing to backfill. The question was moot.
+>
+> **D8 resolved as already-decided:** `contract_compliance.ai_usage` was consciously superseded — its own container comments say so — because it stored a character-count estimate with no output tokens and no cost, and being module-scoped it could not answer the owner's cross-tenant question. `AiUsageRepository` and `summary_for_tenant` are dead code with no callers. Left in place for now; removal belongs in a cleanup commit, not one that also changes billing behaviour.
+>
+> **Prices were seeded from the provider's published list on 2026-09-16**, recorded with that date. Cached-input rates are deliberately **not** modelled: we do not read cache-hit counts back from the provider, and a discount we cannot measure would understate real cost. Over-reporting is the safe direction for a budget guard. `ON CONFLICT DO NOTHING`, so re-running migrations cannot revert a price the owner later edits.
+>
+> Note `/usage/me` is unrelated to the pre-existing `/grants/usage`, which reports *scan quota* rather than money. Similar names, different questions.
+
 **Goal:** A tenant admin sees what their workspace consumed. Cost figures are real, not NULL.
 
 **Depends on:** nothing. **Blocks:** Phase 3 usage view, Phase 7 token limits.
@@ -568,7 +584,7 @@ Required:
 | Q5 | Suspension semantics — hard lockout or read-only? | Phase 5 |
 | Q6 | Retry semantics — does an admin retry reset `attempts` to 0 or continue the count? | Phase 6 |
 | Q7 | Enterprise plans have no limit rows, so unlimited. Intended? | Phase 7 |
-| Q8 | `ai_usage` cost backfill — reconstruct historical cost, or start clean? | Phase 2 |
+| ~~Q8~~ | ~~`ai_usage` cost backfill.~~ **Answered 2026-09-16 by measurement:** production has zero rows in both usage tables, so there is nothing to reconstruct. Moot. | ~~Phase 2~~ |
 | Q9 | Resend is rejecting production sends. Fix now? Invites and password reset both depend on email. | Phase 1 |
 | Q10 | Grants.gov catalogue — production has 0 opportunities. Load it? | Any demo |
 

@@ -17,6 +17,13 @@ usage row still records tokens but leaves ``cost_usd`` empty. Writing 0.00 would
 make an unpriced model look free in every rollup, which is precisely the error
 that hides a runaway bill.
 
+**Model names are normalised before use.** Callers disagreed: contract
+extraction passed ``gpt-5-mini`` while grant enrichment passed
+``openai:gpt-5-mini``. Both name the same model and the same invoice line, but
+left alone they would miss the price row and group separately in every rollup.
+The provider prefix is stripped here, once, rather than relying on every future
+caller to remember the convention.
+
 Writing across the schema boundary into ``platform`` is deliberate. The
 alternative -- each module keeping its own table and platform-core unioning them
 -- makes the owner's rollup O(modules) to maintain, and the module tables are
@@ -36,6 +43,20 @@ from zeus_adapters.interfaces import Database
 log = logging.getLogger(__name__)
 
 TOKENS_PER_MILLION = Decimal(1_000_000)
+
+
+def normalise_model(model: str) -> str:
+    """Strip a ``provider:`` prefix and lower-case the result.
+
+    ``platform.model_pricing`` is keyed on the unqualified model name, because
+    that is what the provider's price list and the invoice both use. Splitting
+    on the last colon rather than the first keeps names containing a colon
+    intact if a provider ever ships one.
+    """
+    name = (model or "").strip()
+    if ":" in name:
+        name = name.rsplit(":", 1)[-1].strip()
+    return name.lower()
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +94,7 @@ class AiUsageRecorder:
         self._prices: dict[str, ModelPrice | None] = {}
 
     async def price_for(self, model: str) -> ModelPrice | None:
+        model = normalise_model(model)
         if model in self._prices:
             return self._prices[model]
         row = await self._db.fetch_one(
@@ -94,7 +116,7 @@ class AiUsageRecorder:
     async def record(
         self,
         *,
-        tenant_id: str,
+        tenant_id: str | None,
         module_id: str,
         operation: str,
         model: str,
@@ -108,11 +130,18 @@ class AiUsageRecorder:
     ) -> None:
         """Record one billable model call.
 
+        ``tenant_id`` may be ``None`` for work done on behalf of the platform
+        rather than a customer -- shared catalogue enrichment being the case
+        this exists for. Attributing that cost to whichever tenant happened to
+        trigger the batch would put shared infrastructure spend on one
+        customer's usage page, so it is recorded as unattributable instead.
+
         Never raises. Metering must not be able to fail a user's request that
         already succeeded -- losing a usage row costs us accounting accuracy,
         while raising here would lose the user's work.
         """
         try:
+            model = normalise_model(model)
             price = await self.price_for(model)
             cost = compute_cost(price, prompt_tokens, completion_tokens)
             await self._db.execute(

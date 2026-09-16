@@ -21,6 +21,7 @@ from zeus_platform_core.routers.billing import router as billing_router
 from zeus_platform_core.routers.entitlements import router as entitlements_router
 from zeus_platform_core.routers.grants import router as grants_router
 from zeus_platform_core.routers.tenancy import router as tenancy_router
+from zeus_platform_core.routers.usage import router as usage_router
 
 
 @asynccontextmanager
@@ -49,6 +50,7 @@ def create_app(container: Container | None = None) -> FastAPI:
     app.include_router(billing_router)
     app.include_router(admin_router)
     app.include_router(grants_router)
+    app.include_router(usage_router)
 
     settings = app.state.container.settings
     # Belt and braces: settings validation already refuses to construct a

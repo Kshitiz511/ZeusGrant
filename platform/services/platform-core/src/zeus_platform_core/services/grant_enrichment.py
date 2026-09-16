@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -147,11 +148,76 @@ widening it.
 class GrantEnrichmentAgent:
     """Wraps the model. Constructed lazily; never touched on a read path."""
 
-    def __init__(self, *, settings: Any, db: Any) -> None:
+    #: Matches ``grant_service.MODULE_ID``. Enrichment feeds Grant
+    #: Intelligence, so its spend belongs under that module in every rollup.
+    MODULE_ID = "grant_intelligence"
+
+    def __init__(self, *, settings: Any, db: Any, metering: Any = None) -> None:
         self._settings = settings
         self._db = db
+        self._metering = metering
         self._eligibility_agent = None
         self._expansion_agent = None
+
+    async def _meter(self, operation: str, result: Any, started: float) -> None:
+        """Record what a model call consumed.
+
+        ``tenant_id`` is None on purpose. Enrichment reads prose for the shared
+        opportunity catalogue: every tenant benefits from the same enriched
+        record, and the job has no tenant context to borrow. Billing this to
+        whichever tenant triggered the batch would put shared infrastructure
+        cost on one customer's usage page.
+
+        Token counts come from the provider's own usage report. Where the
+        provider does not supply them they stay None, which the ledger records
+        as unknown rather than as zero.
+        """
+        if self._metering is None:
+            return
+        prompt = completion = None
+        try:
+            usage = result.usage()
+            # pydantic-ai renamed these between versions; read both rather than
+            # pin a version, since guessing wrong here silently zeroes cost.
+            prompt = getattr(usage, "input_tokens", None)
+            if prompt is None:
+                prompt = getattr(usage, "request_tokens", None)
+            completion = getattr(usage, "output_tokens", None)
+            if completion is None:
+                completion = getattr(usage, "response_tokens", None)
+        except Exception:
+            # An unreadable usage object must not lose the row entirely: the
+            # call still happened and still cost money.
+            log.warning("enrichment.usage_unreadable op=%s", operation, exc_info=True)
+
+        await self._metering.record(
+            tenant_id=None,
+            module_id=self.MODULE_ID,
+            operation=operation,
+            model=self._model_name(),
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    async def _meter_failure(self, operation: str, started: float, exc: Exception) -> None:
+        """A failed call still consumed budget, so it goes to the same ledger.
+
+        Recording failures elsewhere, or not at all, would make every rollup
+        report a 100% success rate by construction -- the exact defect found in
+        the legacy admin dashboard.
+        """
+        if self._metering is None:
+            return
+        await self._metering.record(
+            tenant_id=None,
+            module_id=self.MODULE_ID,
+            operation=operation,
+            model=self._model_name(),
+            latency_ms=int((time.monotonic() - started) * 1000),
+            succeeded=False,
+            error=str(exc),
+        )
 
     def _model_name(self) -> str:
         llm = self._settings.llm
@@ -240,9 +306,15 @@ class GrantEnrichmentAgent:
         code_table = "\n".join(
             f"  {c['code']}: {c['description']}" for c in codes
         )
-        result = await self._eligibility_agent.run(
-            f"Applicant-type codes:\n{code_table}\n\nEligibility text:\n{text}"
-        )
+        started = time.monotonic()
+        try:
+            result = await self._eligibility_agent.run(
+                f"Applicant-type codes:\n{code_table}\n\nEligibility text:\n{text}"
+            )
+        except Exception as exc:
+            await self._meter_failure("read_eligibility", started, exc)
+            raise
+        await self._meter("read_eligibility", result, started)
         reading: EligibilityReading = result.output
 
         # Guard the model's output against the reference data. A hallucinated
@@ -271,9 +343,15 @@ class GrantEnrichmentAgent:
         if self._expansion_agent is None:
             self._expansion_agent = self._build(ConceptExpansion, _EXPANSION_PROMPT)
 
-        result = await self._expansion_agent.run(
-            "Focus areas:\n" + "\n".join(f"- {a}" for a in focus_areas)
-        )
+        started = time.monotonic()
+        try:
+            result = await self._expansion_agent.run(
+                "Focus areas:\n" + "\n".join(f"- {a}" for a in focus_areas)
+            )
+        except Exception as exc:
+            await self._meter_failure("expand_concepts", started, exc)
+            raise
+        await self._meter("expand_concepts", result, started)
         terms = [t.strip() for t in result.output.terms if t.strip()][:20]
         await self._store_raw(key, {"terms": terms})
         return terms
