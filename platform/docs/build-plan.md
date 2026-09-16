@@ -141,8 +141,20 @@ Pre-flight rejects with 402 before work starts. Post-flight records actual consu
 **DEC-6 — Admin mutations are all audited, append-only, cross-tenant.**
 A new `platform.admin_audit` table. Every price change, key rotation, tenant suspension and job cancellation writes a row with actor, before-value, after-value. Secrets record only the fact of a change, never the value.
 
-**DEC-7 — Nothing invented on the landing page.**
-No fabricated customer counts, funding figures, or logos. Claims must be verifiable. Where proof does not exist yet, sell on mechanism and specificity. This is both an integrity position and a Google Ads policy one — unverifiable claims risk disapproval.
+**DEC-7 — Placeholder proof points are allowed, but only if they cannot ship by accident.** *(revised 2026-09-16)*
+
+Originally this decision said nothing would be invented. The owner has since decided that illustrative figures are wanted now, to be replaced with the client's real numbers once the project is won. That is reasonable for a pitch, and dangerous for a live site, so the decision is not "invent freely" but "invent in one place, behind a switch".
+
+Rules:
+
+1. **One source.** Every claimable number lives in `apps/console/src/content/proof-points.ts`. Nowhere else. No figure is hardcoded into a component.
+2. **Each is tagged** `verified` or `placeholder`. There is no third state and no default — a new entry that omits the tag fails to compile.
+3. **A placeholder is visible in the UI** whenever the site is not in pitch mode, as a marker on the figure. This is the part that matters: a silent placeholder is indistinguishable from a real number, and the person who forgets to swap it will be us.
+4. **Production refuses to build with placeholders** unless `ZEUS_ALLOW_PLACEHOLDER_PROOF=1` is set explicitly. The default is refusal, so the safe outcome is the one that requires no one to remember anything.
+5. **Two kinds are still forbidden outright**, pitch or not: named customers and logos we do not have, and regulatory or certification claims (SOC 2, HIPAA, FedRAMP). The first is passing off; the second is a legal exposure, and neither becomes acceptable by being labelled.
+6. **Mechanism claims are held to the original standard** — that we score deterministically with visible reasons, cite clauses, and enforce isolation in the database. These are true today, they are the actual differentiators, and they need no asterisk.
+
+The Ads constraint survives intact: unverifiable claims risk disapproval, so before any campaign runs, every `placeholder` must have become `verified` or been removed. Phase 11's exit criteria enforce this.
 
 **DEC-8 — Marketing routes get prerendered HTML; the app stays a SPA.**
 `vite-plugin-ssg` style prerender for `/`, `/pricing`, and any future marketing route. The authenticated console does not need indexing and stays client-rendered.
@@ -156,6 +168,12 @@ Consistent with the existing `plan_limits` convention. A missing row means unlim
 ---
 
 ## 4. Phase 1 — Tenant roles, membership, invites
+
+> **Status: DONE, deployed as `cbb6984` on 2026-09-16.** Migration 0014 applied locally and in production; `verify_schema.py` 10/10 on both; 287 tests green; ruff clean; routes live and returning 401 unauthenticated at `/api/core/tenancy/*`. Closed D1, D2, D4, D6.
+>
+> Two things worth carrying forward. First, the API prefix is **`/api/core`**, not `/api` — `api/index.py` mounts the two services on exact prefixes and everything else falls through to the SPA catch-all, so an unprefixed probe returns the console's HTML with a 200 and looks like a pass. Second, both new test files were run against a deliberately broken build to confirm they fail when the behaviour is removed; a test that has never failed has not been shown to test anything.
+>
+> Q9 was worked around rather than fixed: invite creation returns the accept link alongside sending it, so an admin can copy it while Resend is still rejecting production sends. The underlying email problem remains open.
 
 **Goal:** A tenant admin can see their team, invite people, assign roles, and remove them. Seats are enforced.
 
@@ -497,14 +515,27 @@ The gap is larger than "leftover features". Missing items, by size:
 
 **Do not port** (verified as mock/dead in legacy): client-side "funding scan" that does not scan; hardcoded service-health `operational`; AI success rate defaulting to 100%; Lovable error plumbing and Supabase preview shim; client-side token minting via `crypto.randomUUID` for agency portal access; three competing pricing models.
 
-**Scope decision required (§13).**
+**Scope: all of it.** *(decided 2026-09-16)* Every legacy module is in scope — Proposals, Profile Intelligence, Grant Tracker, Audit Vault and contract financials. The "do not port" list above is unaffected by this: those items are mock or dead code, so porting them would move the appearance of a feature without the feature.
+
+This makes Phase 9 by far the largest phase, and it will not ship as one release. It is therefore split, and each part ships on its own (DEC-9):
+
+- **9a — Quick wins.** The list above. Small, independent, and several are things a paying tenant would expect to already exist.
+- **9b — Grant Tracker.** Pipeline, calendar, stage history, awards, export. Closest to the existing grants module, so it reuses the most.
+- **9c — Profile Intelligence.** Scraping, extraction, content library, strength scoring. Feeds matching quality, so it lifts a module we already ship.
+- **9d — Proposals.** The largest, and the one that most needs Phase 2's cost metering underneath it, because it is the heaviest AI consumer in the product.
+- **9e — Audit Vault.** Evidence store, hashing, retention, readiness. Already advertised as `coming_soon` in the module catalogue, so this one is a promise outstanding.
+- **9f — Contract financials.** Budgets, rate cards, invoices.
+
+Ordering is deliberate: cheapest and most visible first, and the two AI-heavy modules after the metering and guardrails from Phases 2 and 7 exist, so they cannot quietly run up unbounded cost.
 
 ### Phase 10 — UI/UX
 Use the `ui-ux-pro-max` prompt now present at `platform/.github/prompts/ui-ux-pro-max/`. Constraints: keep the existing Zeus tokens (Tailwind v4 oklch, Figtree); enterprise density, not consumer marketing; every state designed (loading, empty, error, locked, over-limit); accessibility — focus states, contrast, keyboard paths, `prefers-reduced-motion`.
 
 ### Phase 11 — Landing copy and SEO
 
-**Copy.** Per DEC-7, nothing invented. Structure: a specific claim, the mechanism, then proof. Replace hedged AI-sounding phrasing with concrete nouns and numbers that are true — catalogue size, deterministic scoring with visible reasons, clause-level citations, database-enforced isolation. These are real differentiators and read as confident rather than salesy.
+**Copy.** Structure: a specific claim, the mechanism, then proof. The reason the current page reads as "AI-generated" is that it is all adjective and no mechanism — it asserts outcomes without ever saying how. Replace hedged phrasing with concrete nouns and numbers: catalogue size, deterministic scoring with visible reasons, clause-level citations, database-enforced isolation. Those are true today and read as confident rather than salesy.
+
+Illustrative figures are permitted under the revised DEC-7, from `proof-points.ts`, tagged `placeholder`, visibly marked outside pitch mode. Before any Ads campaign runs, every placeholder must be verified or removed — see the exit criteria.
 
 **SEO — the term you were reaching for is prerendering / SSG, plus structured data.** A SPA serves one empty `index.html`; crawlers and the Ads landing-page checker see nothing.
 
@@ -522,7 +553,7 @@ Required:
 - **Consent Mode v2** — required for EEA traffic
 - Privacy policy and terms pages — Ads will not approve without them
 - Landing page relevance: ad copy, headline and page must agree
-- No unverifiable claims (same constraint as DEC-7)
+- **Zero `placeholder` proof points remaining.** This is a hard gate, not a preference. Running ads against invented figures is the one version of DEC-7 that carries real consequences — Ads disapproval at best, a misrepresentation claim at worst. The build check exists so this cannot be forgotten; before a campaign it must also be confirmed by eye.
 
 ---
 
@@ -530,9 +561,9 @@ Required:
 
 | # | Question | Blocks |
 |---|---|---|
-| Q1 | Landing page proof points — what is genuinely true? Orgs onboarded, funding tracked, hours saved, relevant credentials. If nothing yet, say so and I write mechanism-led copy. | Phase 11 |
-| Q2 | Legacy scope — which of Proposals / Profile Intelligence / Grant Tracker / Audit Vault are actually in scope? | Phase 9 |
-| Q3 | Grant limit values — what should `scans_per_month` and `matches_visible` be per plan? Current hardcoded fallbacks are 4 and 50. | **Phase 1** |
+| ~~Q1~~ | ~~Landing page proof points.~~ **Answered 2026-09-16:** invent illustrative figures for now, swap for the client's real data once the project is won. Implemented under the revised DEC-7 — single source, tagged, visibly marked, build refuses to ship them to production by default. Named customers, logos and compliance certifications remain forbidden. | ~~Phase 11~~ |
+| ~~Q2~~ | ~~Legacy scope.~~ **Answered 2026-09-16:** all modules in scope. Phase 9 split into 9a–9f, ordered cheapest-and-most-visible first, with the AI-heavy modules deferred until metering (Phase 2) and guardrails (Phase 7) exist. | ~~Phase 9~~ |
+| ~~Q3~~ | ~~Grant limit values.~~ **Answered 2026-09-16 by assumption:** seeded at the values the hardcoded fallbacks already used, so no existing tenant's behaviour changed. Those fallbacks are **3 scans and 25 matches** — the 4 and 50 previously recorded here were wrong. Seeded in migration 0014 as scans 3/10/30/100 and matches 25/100/unlimited/unlimited. Revisit when pricing is set commercially. | ~~Phase 1~~ |
 | Q4 | Page definition — how is a page counted for DOCX and plain text? Proposal: `ceil(chars / 3000)`. | Phase 7 |
 | Q5 | Suspension semantics — hard lockout or read-only? | Phase 5 |
 | Q6 | Retry semantics — does an admin retry reset `attempts` to 0 or continue the count? | Phase 6 |
