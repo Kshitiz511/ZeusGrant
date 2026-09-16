@@ -73,9 +73,9 @@ No `INSERT` exists in any migration or script. `price_for()` returns `None` for 
 Eight plans carry a `team_seats` limit. Zero non-test code reads it. Invites must enforce it or seats are decorative.
 **Fix in Phase 1.**
 
-### D5 — No path to `platform_admin`
+### D5 — No path to `platform_admin` — **CLOSED (Phase 4, `0748d2c`)**
 `routers/admin.py` guards on `"platform_admin" in session.roles`. Roles come from the JWT. The only issuer is the **dev-only** token router. There is no table, no flag, no bootstrap. **The admin API is unreachable in production.**
-**Fix in Phase 4.**
+**Fixed in Phase 4.** `platform.users.is_platform_admin` (migration 0016), read from the database on every token mint, granted by `scripts/grant_platform_admin.py`. Held in production by `beboyshitij@gmail.com` since 2026-09-16.
 
 ### D6 — Membership cache has no invalidation hook
 `membership:{user}:{tenant}` has a 60 s TTL and no explicit delete. Removing a member leaves them with access for up to 60 s.
@@ -105,9 +105,9 @@ It is in the CHECK constraint; nothing writes it. Needed for admin job cancellat
 There is no reaper. If nothing claims, expired leases are never swept, and a stuck job stays "running" forever with no observer.
 **Fix in Phase 6.**
 
-### D13 — No admin authorization tests
+### D13 — No admin authorization tests — **CLOSED (Phase 4, `0748d2c`)**
 Zero tests assert that a non-admin gets 403 from admin routes, or that `platform_admin` cannot be self-granted via token exchange.
-**Fix in Phase 4.**
+**Fixed in Phase 4.** `tests/test_platform_admin.py` (25 tests) covers both, parametrised over every admin route, plus a structural test asserting the parametrised list matches the router's registered routes so a new endpoint cannot escape it. Verified by breaking both guarantees and watching the tests fail.
 
 ### D14 — `ZEUS_JWT_SECRET` is in `BOOTSTRAP_KEYS` but is not a settings field
 The real field is `ZEUS_SUPABASE_JWT_SECRET`. The frozenset entry protects nothing.
@@ -373,9 +373,73 @@ trusted on the deploy badge alone.
 One function every admin mutation calls. Secrets record `{"changed": true}`, never the value.
 
 ### Exit criteria
-- [ ] Your account holds the flag in production; `GET /admin/settings` returns 200 for you and 403 for everyone else
-- [ ] Every existing `/admin` route writes an audit row
-- [ ] D5, D13 closed
+- [x] Your account holds the flag in production — `beboyshitij@gmail.com`, granted
+      2026-09-16, audited. Unauthenticated `/admin/*` returns 401 in production; a
+      non-admin gets 403 (covered by tests). **Not yet confirmed by signing in** — no
+      admin UI exists to sign into until Phase 8; the flow is proven end-to-end locally.
+- [x] Every existing `/admin` route writes an audit row — enforced by a structural test
+      that compares the guard list against the router's registered routes, so a new
+      endpoint cannot be added and silently escape it
+- [x] D5, D13 closed
+
+### DONE — commits `0748d2c` + `8d815ae`, deployed and verified in production
+
+**Shipped:** migration `0016_platform_admin.sql`; `repositories/audit.py`;
+`repositories/tenants.py` (`is_platform_admin`, `set_platform_admin`,
+`list_platform_admins`); `routers/admin.py` (audit on every mutation, plus
+`GET /admin/audit`); `routers/tenancy.py` and `services/auth_service.py` (token mint);
+`domain/models.py` (`PLATFORM_ADMIN_ROLE`); `tests/test_platform_admin.py` (25);
+`scripts/grant_platform_admin.py`, `scripts/probe_platform_admin.py`,
+`scripts/e2e_platform_admin.py`.
+
+**The security property, stated precisely.** `POST /tenancy/token` returns a *more*
+privileged token than it consumes. It previously merged `session.roles` forward, so a
+token claiming `platform_admin` would have been believed, and anyone who ever held the
+role would have kept it permanently. Roles are now rebuilt from authoritative sources on
+every mint — membership from `platform.memberships`, the platform flag from
+`platform.users`. The same change is what makes a revoke meaningful: it takes effect at
+the next mint rather than whenever an outstanding token expires.
+
+**Append-only is a database privilege, not a convention.** `zeus_app` holds INSERT and
+SELECT on `admin_audit`; UPDATE and DELETE are revoked. The REVOKE is load-bearing, not
+belt-and-braces: `provision_db_role` sets `ALTER DEFAULT PRIVILEGES` granting UPDATE and
+DELETE on future tables in this schema, so without it the table would have arrived
+quietly editable. Verified against real Postgres as `zeus_app` — 14/14 locally and 14/14
+in production.
+
+**Why the bootstrap is a script.** An endpoint that creates platform admins must itself
+be guarded by platform admin. The usual escapes from that circle — a hardcoded email in a
+migration, a setup route open until first use, an env var read at startup — each create a
+path to the highest privilege in the system that is not a deliberate recorded act. The
+script audits its own first grant; a trail with a gap at the beginning cannot answer the
+most interesting question about itself.
+
+**Three findings:**
+
+1. *The end-to-end probe caught a defect the unit tests did not.* Audit rows were written
+   with `actor_email` NULL, because first-party tokens carry only a subject and roles and
+   `Session.email` is None for them. It matters most in the case the schema was designed
+   for: `actor_user_id` is set to NULL when an account is deleted, leaving the flat email
+   as the only identification. Now read from the database, with a unit test.
+
+2. *A test that passed locally and failed in CI.* It set `llm.openai_api_key`, a secret,
+   which needs a SecretBox built from `ZEUS_SECRETS_ENCRYPTION_KEY` — set in my shell, not
+   in CI. It now uses a non-secret key, which is the stronger assertion anyway since
+   `put_setting` redacts unconditionally. **Rule going forward:** verify with the
+   environment stripped (`env -i`), not by rerunning in the shell where it already passed.
+
+3. *Both guarantees were confirmed by breaking them.* Reinstating the carry-forward failed
+   the two forgery tests; deleting one `_audit` call failed the audit test.
+
+**Knowingly not built:**
+- Hiding admin routes from the OpenAPI schema for non-admins. They are unusable without
+  the role, and a schema that varies by caller makes the API harder to reason about for
+  no security gain — the guard is the control, not the concealment.
+- A general role/permission system. There is one platform-wide privilege and no second
+  use case yet; a boolean that is trivially auditable beats a framework whose first real
+  use is a single row.
+- Audit retention and pruning. Nothing can delete rows today, by design. Revisit when
+  volume justifies it, as an owner-role job rather than an application capability.
 
 ---
 
