@@ -269,7 +269,13 @@ class Container:
 
     @cached_property
     def tenancy(self) -> TenancyService:
-        return TenancyService(self.tenants)
+        return TenancyService(
+            self.tenants,
+            cache=self.cache,
+            email=self.email_sender,
+            entitlements=self.entitlements,
+            app_base_url=self.settings.app_base_url,
+        )
 
     @cached_property
     def auth_service(self) -> AuthService:

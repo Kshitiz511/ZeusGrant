@@ -99,6 +99,67 @@ async def get_tenant_id(
 TenantIdDep = Annotated[str, Depends(get_tenant_id)]
 
 
+#: Roles permitted to manage a workspace: add people, change what they can do,
+#: remove them. ``member`` and ``viewer`` are deliberately absent.
+TENANT_ADMIN_ROLES: frozenset[str] = frozenset({"owner", "admin"})
+
+
+async def get_membership_role(
+    container: ContainerDep, session: SessionDep, tenant_id: TenantIdDep
+) -> str:
+    """The caller's role in the active tenant.
+
+    ``get_tenant_id`` has already proven membership for a header-supplied
+    tenant, but it does not return the role and it does not query at all when
+    the tenant came from the token. The role is read here so the two concerns
+    stay separate: one answers "may you act as this tenant", this one answers
+    "what may you do within it".
+    """
+    role = await container.tenants.get_membership_role(
+        tenant_id=tenant_id, user_id=session.user_id
+    )
+    if role is None:
+        # Same reasoning as get_tenant_id: 404 rather than 403, so this cannot
+        # be used to confirm that a workspace exists.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such workspace.")
+    return role
+
+
+MembershipRoleDep = Annotated[str, Depends(get_membership_role)]
+
+
+async def require_tenant_admin(role: MembershipRoleDep) -> str:
+    """Guard workspace-administration routes.
+
+    403 here, unlike the 404 used for a tenant the caller cannot see. The
+    distinction is deliberate: they are a member of this workspace, so its
+    existence is not a secret from them -- they simply are not permitted to
+    administer it, and telling them so is the only way they can act on it.
+    """
+    if role not in TENANT_ADMIN_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only a workspace owner or admin can do that.",
+        )
+    return role
+
+
+TenantAdminDep = Annotated[str, Depends(require_tenant_admin)]
+
+
+async def require_tenant_owner(role: MembershipRoleDep) -> str:
+    """Guard the operations only an owner may perform (ownership transfer)."""
+    if role != "owner":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the workspace owner can do that.",
+        )
+    return role
+
+
+TenantOwnerDep = Annotated[str, Depends(require_tenant_owner)]
+
+
 async def get_claims(container: ContainerDep, tenant_id: TenantIdDep) -> EntitlementClaims:
     return await container.entitlements.get_claims(tenant_id)
 

@@ -19,7 +19,11 @@ from zeus_platform_core.repositories.opportunities import OpportunityRepository,
 
 log = logging.getLogger(__name__)
 
-MODULE_ID = "grant-intelligence"
+#: Must match the module id used by the database, the job ledger and the
+#: entitlement claims. It read "grant-intelligence" with a hyphen until 0014,
+#: so every limit lookup missed and the service silently used the defaults
+#: below -- a plan could not raise or lower anything about Grant Intelligence.
+MODULE_ID = "grant_intelligence"
 
 #: Limit keys read from the plan's entitlements.
 LIMIT_SCANS_PER_MONTH = "scans_per_month"

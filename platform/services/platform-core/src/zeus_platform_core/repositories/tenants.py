@@ -233,16 +233,25 @@ class TenantRepository:
         assert row is not None
         return Tenant(**row)
 
-    async def add_membership(self, *, tenant_id: str, user_id: str, role: Role) -> None:
+    async def add_membership(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        role: Role,
+        invited_by: str | None = None,
+    ) -> None:
         await self._db.execute(
             """
-            INSERT INTO platform.memberships (tenant_id, user_id, role)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (tenant_id, user_id) DO UPDATE SET role = EXCLUDED.role
+            INSERT INTO platform.memberships (tenant_id, user_id, role, invited_by)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (tenant_id, user_id) DO UPDATE
+              SET role = EXCLUDED.role, updated_at = now()
             """,
             tenant_id,
             user_id,
             str(role),
+            invited_by,
         )
 
     async def get_by_slug(self, slug: str) -> Tenant | None:
@@ -290,6 +299,223 @@ class TenantRepository:
             """,
             user_id,
         )
+
+    # --- members -------------------------------------------------------------
+
+    async def list_members(self, tenant_id: str) -> list[dict]:
+        """Everyone in a workspace, owner first.
+
+        Ordered by role rather than by name so the person answerable for the
+        account is at the top of the list, which is what an admin looking at
+        this screen is usually trying to find.
+        """
+        return await self._db.fetch(
+            """
+            SELECT u.id::text   AS user_id,
+                   u.email,
+                   u.full_name,
+                   m.role,
+                   m.created_at,
+                   m.invited_by::text AS invited_by
+              FROM platform.memberships m
+              JOIN platform.users u ON u.id = m.user_id
+             WHERE m.tenant_id = $1
+             ORDER BY CASE m.role
+                        WHEN 'owner'  THEN 0
+                        WHEN 'admin'  THEN 1
+                        WHEN 'member' THEN 2
+                        ELSE 3
+                      END,
+                      m.created_at
+            """,
+            tenant_id,
+        )
+
+    async def count_members(self, tenant_id: str) -> int:
+        row = await self._db.fetch_one(
+            "SELECT count(*) AS n FROM platform.memberships WHERE tenant_id = $1",
+            tenant_id,
+        )
+        return int(row["n"]) if row else 0
+
+    async def update_member_role(self, *, tenant_id: str, user_id: str, role: Role) -> bool:
+        """Change a role. Returns False when there is no such membership.
+
+        Deliberately refuses to write 'owner'. The one-owner index would reject
+        a second one anyway, but failing here gives a clear error instead of a
+        unique-violation surfacing as a 500. Ownership moves through
+        ``transfer_ownership``.
+        """
+        if role is Role.owner:
+            raise ValueError("Use transfer_ownership to move ownership.")
+        row = await self._db.fetch_one(
+            """
+            UPDATE platform.memberships
+               SET role = $3, updated_at = now()
+             WHERE tenant_id = $1 AND user_id = $2 AND role <> 'owner'
+            RETURNING user_id::text
+            """,
+            tenant_id,
+            user_id,
+            str(role),
+        )
+        return row is not None
+
+    async def remove_member(self, *, tenant_id: str, user_id: str) -> bool:
+        """Remove a member. The owner is excluded by the WHERE clause.
+
+        Returns False both when the membership does not exist and when it is
+        the owner's, so the caller cannot use the result to distinguish the two
+        -- neither is a permitted outcome and both are the same refusal.
+        """
+        row = await self._db.fetch_one(
+            """
+            DELETE FROM platform.memberships
+             WHERE tenant_id = $1 AND user_id = $2 AND role <> 'owner'
+            RETURNING user_id::text
+            """,
+            tenant_id,
+            user_id,
+        )
+        return row is not None
+
+    async def transfer_ownership(
+        self, *, tenant_id: str, from_user_id: str, to_user_id: str
+    ) -> None:
+        """Move ownership between two existing members.
+
+        The demotion and the promotion are two statements against a table with
+        a unique index permitting one owner, so the order matters: demote
+        first, or the promotion violates the index. Both run inside the
+        caller's transaction.
+        """
+        await self._db.execute(
+            """
+            UPDATE platform.memberships
+               SET role = 'admin', updated_at = now()
+             WHERE tenant_id = $1 AND user_id = $2 AND role = 'owner'
+            """,
+            tenant_id,
+            from_user_id,
+        )
+        await self._db.execute(
+            """
+            UPDATE platform.memberships
+               SET role = 'owner', updated_at = now()
+             WHERE tenant_id = $1 AND user_id = $2
+            """,
+            tenant_id,
+            to_user_id,
+        )
+        await self._db.execute(
+            "UPDATE platform.tenants SET owner_user_id = $2, updated_at = now() WHERE id = $1",
+            tenant_id,
+            to_user_id,
+        )
+
+    # --- invites -------------------------------------------------------------
+
+    async def create_invite(
+        self,
+        *,
+        tenant_id: str,
+        email: str,
+        role: Role,
+        token_hash: str,
+        invited_by: str,
+        ttl_hours: int,
+    ) -> dict:
+        row = await self._db.fetch_one(
+            """
+            INSERT INTO platform.invites
+                   (tenant_id, email, role, token_hash, invited_by, expires_at)
+            VALUES ($1, $2, $3, $4, $5, now() + make_interval(hours => $6))
+            RETURNING id::text, tenant_id::text, email, role, expires_at, created_at
+            """,
+            tenant_id,
+            email,
+            str(role),
+            token_hash,
+            invited_by,
+            ttl_hours,
+        )
+        assert row is not None
+        return dict(row)
+
+    async def get_invite_by_hash(self, token_hash: str) -> dict | None:
+        """Look an invite up by its hashed token.
+
+        Expiry is not filtered here. The caller judges it so it can say "this
+        invite has expired" rather than "no such invite", which is the
+        difference between a user asking for a fresh one and a user assuming
+        the link was fake.
+        """
+        row = await self._db.fetch_one(
+            """
+            SELECT i.id::text, i.tenant_id::text AS tenant_id, i.email, i.role,
+                   i.expires_at, i.accepted_at, i.revoked_at,
+                   t.name AS tenant_name
+              FROM platform.invites i
+              JOIN platform.tenants t ON t.id = i.tenant_id
+             WHERE i.token_hash = $1
+            """,
+            token_hash,
+        )
+        return dict(row) if row else None
+
+    async def list_invites(self, tenant_id: str) -> list[dict]:
+        """Invites still outstanding. Accepted and revoked rows are kept in the
+        table for the audit trail but are not pending, so they are not shown."""
+        return await self._db.fetch(
+            """
+            SELECT i.id::text, i.email, i.role, i.expires_at, i.created_at,
+                   u.email AS invited_by_email
+              FROM platform.invites i
+         LEFT JOIN platform.users u ON u.id = i.invited_by
+             WHERE i.tenant_id = $1
+               AND i.accepted_at IS NULL
+               AND i.revoked_at IS NULL
+             ORDER BY i.created_at DESC
+            """,
+            tenant_id,
+        )
+
+    async def revoke_invite(self, *, tenant_id: str, invite_id: str) -> bool:
+        row = await self._db.fetch_one(
+            """
+            UPDATE platform.invites
+               SET revoked_at = now()
+             WHERE id = $1 AND tenant_id = $2
+               AND accepted_at IS NULL AND revoked_at IS NULL
+            RETURNING id::text
+            """,
+            invite_id,
+            tenant_id,
+        )
+        return row is not None
+
+    async def mark_invite_accepted(self, *, invite_id: str, user_id: str) -> bool:
+        """Consume an invite.
+
+        The WHERE clause re-checks unaccepted, unrevoked and unexpired rather
+        than trusting the caller's earlier read. Two people clicking the same
+        link at once both pass that read; only one of them updates a row here,
+        and the loser is told the invite is no longer valid.
+        """
+        row = await self._db.fetch_one(
+            """
+            UPDATE platform.invites
+               SET accepted_at = now(), accepted_by = $2
+             WHERE id = $1
+               AND accepted_at IS NULL
+               AND revoked_at IS NULL
+               AND expires_at > now()
+            RETURNING id::text
+            """,
+            invite_id,
+            user_id,
+        )
+        return row is not None
 
     async def set_stripe_customer(self, tenant_id: str, customer_id: str) -> None:
         await self._db.execute(

@@ -55,9 +55,16 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Scratch checkouts that sometimes sit in the repo root. They are never
+# committed, so CI never sees them; this only stops a local `ruff check .`
+# from reporting on code we do not own.
+extend-exclude = ["ponytail", "graphify", "ui-ux-pro-max-skill", ".github/prompts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Only our own code. Without this, a bare `pytest` also collects any vendored or
+# scratch checkout sitting in the repo root, which fails on imports we do not own.
+testpaths = ["services", "packages"]

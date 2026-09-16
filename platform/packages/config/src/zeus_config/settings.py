@@ -193,6 +193,11 @@ class Settings(_Base):
     env: Environment = Field(default=Environment.development, alias="ZEUS_ENV")
     log_level: str = Field(default="INFO", alias="ZEUS_LOG_LEVEL")
     dev_tokens_enabled: bool = Field(default=False, alias="ZEUS_DEV_TOKENS")
+    # Public origin of the console, used to build links that arrive in email
+    # (invitations today). It cannot be derived from the request: a link built
+    # from a Host header is a link an attacker can point wherever they like,
+    # which turns an invitation into a credential-harvesting page.
+    app_base_url: str = Field(default="http://localhost:5173", alias="ZEUS_APP_BASE_URL")
     # Shared secret authenticating internal worker callbacks (queue -> HTTP).
     worker_secret: SecretStr | None = Field(default=None, alias="ZEUS_WORKER_SECRET")
     secrets_encryption_key: SecretStr | None = Field(
