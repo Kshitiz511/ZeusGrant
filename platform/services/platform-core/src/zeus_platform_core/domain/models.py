@@ -19,6 +19,20 @@ class Role(StrEnum):
     viewer = "viewer"
 
 
+#: The platform-wide operator privilege, carried in a token's ``roles`` claim.
+#:
+#: Deliberately not a member of ``Role`` above: that enum describes a person's
+#: standing *within one workspace*, and this is orthogonal to any workspace.
+#: Folding it in would make "owner or platform_admin" look like a choice
+#: between two comparable things, and would let it be stored in
+#: ``platform.memberships.role`` where it has no meaning.
+#:
+#: It lives here, in the domain layer, rather than in ``security`` so that
+#: token-minting services can name it without importing the FastAPI dependency
+#: module -- which imports the container, which imports those same services.
+PLATFORM_ADMIN_ROLE = "platform_admin"
+
+
 class SubscriptionStatus(StrEnum):
     trialing = "trialing"
     active = "active"

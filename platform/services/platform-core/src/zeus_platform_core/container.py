@@ -45,6 +45,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 from zeus_service_kit.dispatch import JobNotifier
 from zeus_service_kit.jobs import JobRepository
 
+from zeus_platform_core.repositories.audit import AuditRepository
 from zeus_platform_core.repositories.billing import (
     BillingEventRepository,
     EntitlementRepository,
@@ -383,6 +384,11 @@ class Container:
     @cached_property
     def usage(self) -> UsageRepository:
         return UsageRepository(self.db)
+
+    @cached_property
+    def audit(self) -> AuditRepository:
+        """The append-only record of platform-admin actions."""
+        return AuditRepository(self.db)
 
     @cached_property
     def enrichment(self):

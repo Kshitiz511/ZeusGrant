@@ -75,8 +75,11 @@ def test_member_gets_tenant_scoped_token(client, stub_auth):
     assert body["access_token"] == f"tenant-token:{TENANT}"
     assert body["tenant_id"] == TENANT
     assert body["role"] == "owner"
-    # Claims issued for the right subject, tenant, and merged roles.
-    assert stub_auth.issued == [(USER, TENANT, sorted({"owner", "member"}))]
+    # Roles are rebuilt from the database, NOT merged with the incoming token's.
+    # The stub session arrives carrying "member"; it does not survive the
+    # exchange. This route returns a more privileged token than it consumes, so
+    # anything it copies across is something a token holder keeps forever.
+    assert stub_auth.issued == [(USER, TENANT, ["owner"])]
 
 
 def test_non_member_is_forbidden(client, stub_auth):

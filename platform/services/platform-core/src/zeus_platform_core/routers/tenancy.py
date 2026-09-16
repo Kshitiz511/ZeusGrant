@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from zeus_platform_core.domain.models import Role
 from zeus_platform_core.security import (
+    PLATFORM_ADMIN_ROLE,
     ContainerDep,
     MembershipRoleDep,
     SessionDep,
@@ -148,8 +149,16 @@ async def exchange_token(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You are not a member of this tenant.",
         )
-    roles = sorted({role, *session.roles})
-    token = await container.auth.issue_claims(session.user_id, body.tenant_id, roles)
+    # Roles are rebuilt from authoritative sources on every mint, NOT carried
+    # forward from the incoming token. This route takes a token and returns a
+    # more privileged one, so anything it copies across is something the holder
+    # of a token can keep forever. Membership role comes from the database, and
+    # so does platform_admin -- which means revoking either takes effect on the
+    # next mint rather than whenever the current token happens to expire.
+    roles = [role]
+    if await container.tenants.is_platform_admin(session.user_id):
+        roles.append(PLATFORM_ADMIN_ROLE)
+    token = await container.auth.issue_claims(session.user_id, body.tenant_id, sorted(roles))
     return TokenResponse(
         access_token=token, tenant_id=body.tenant_id, role=role
     )

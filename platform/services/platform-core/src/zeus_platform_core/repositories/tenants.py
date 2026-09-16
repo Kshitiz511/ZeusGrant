@@ -57,6 +57,54 @@ class TenantRepository:
             user_id,
         )
 
+    async def is_platform_admin(self, user_id: str) -> bool:
+        """Whether this account holds the platform-wide operator privilege.
+
+        Read from the database on every token mint rather than carried forward
+        from an existing token. The difference matters: a token is a snapshot
+        taken when it was issued, so revoking the flag would otherwise leave
+        the privilege live until the holder's token expired. Reading it here
+        means a revocation takes effect on the next mint.
+
+        Returns False for an unknown user rather than raising. The callers are
+        token-mint paths that have already established identity; if the account
+        has since vanished, "not an admin" is the safe answer and the mint
+        fails for its own reasons further along.
+        """
+        row = await self._db.fetch_one(
+            "SELECT is_platform_admin FROM platform.users WHERE id = $1",
+            user_id,
+        )
+        return bool(row and row["is_platform_admin"])
+
+    async def set_platform_admin(self, user_id: str, *, enabled: bool) -> bool:
+        """Grant or revoke the platform privilege. Returns True if a row changed.
+
+        Deliberately not exposed over HTTP. The only caller is
+        ``scripts/grant_platform_admin.py``, which pairs it with an audit row.
+        Making the first admin over an API would mean an endpoint that can
+        create its own caller's privilege, which is a bootstrap hole; making it
+        a deliberate act at the console with a record is the safer shape.
+        """
+        row = await self._db.fetch_one(
+            """
+            UPDATE platform.users SET is_platform_admin = $2
+            WHERE id = $1 AND is_platform_admin IS DISTINCT FROM $2
+            RETURNING id
+            """,
+            user_id,
+            enabled,
+        )
+        return row is not None
+
+    async def list_platform_admins(self) -> list[dict]:
+        """Every account holding the privilege. Used by the bootstrap script to
+        show who already has it before granting it to somebody else."""
+        return await self._db.fetch(
+            "SELECT id, email, full_name FROM platform.users "
+            "WHERE is_platform_admin ORDER BY lower(email)"
+        )
+
     async def mark_email_verified(self, user_id: str) -> None:
         # Idempotent by design: the WHERE clause keeps the original timestamp,
         # so re-verifying does not rewrite when it first happened.

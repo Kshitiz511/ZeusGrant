@@ -14,7 +14,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from zeus_adapters.models import Session
 
 from zeus_platform_core.container import Container
-from zeus_platform_core.domain.models import EntitlementClaims
+from zeus_platform_core.domain.models import PLATFORM_ADMIN_ROLE, EntitlementClaims
 
 # auto_error=False so a missing token normalizes to 401 (not 403) while still
 # advertising the scheme in OpenAPI (renders the Swagger "Authorize" button).
@@ -182,7 +182,9 @@ def require_module(module_id: str):
     return _guard
 
 
-PLATFORM_ADMIN_ROLE = "platform_admin"
+# PLATFORM_ADMIN_ROLE is defined in domain.models and imported above. It is
+# used by the guard below and re-exported implicitly, so existing callers that
+# import it from here keep working.
 
 
 async def require_platform_admin(session: SessionDep) -> Session:

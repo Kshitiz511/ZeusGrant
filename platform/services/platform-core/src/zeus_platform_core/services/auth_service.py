@@ -20,7 +20,7 @@ import uuid
 
 from zeus_adapters.interfaces import AuthProvider
 
-from zeus_platform_core.domain.models import SubscriptionStatus
+from zeus_platform_core.domain.models import PLATFORM_ADMIN_ROLE, SubscriptionStatus
 from zeus_platform_core.repositories.billing import SubscriptionRepository
 from zeus_platform_core.repositories.tenants import TenantRepository
 from zeus_platform_core.services.entitlements_service import EntitlementsService
@@ -270,7 +270,15 @@ class AuthService:
         tenants = await self._tenants.list_user_tenants(user_id)
         # User-level token: no tenant claim; the console exchanges it for a
         # tenant-scoped token via POST /tenancy/token.
-        token = await self._auth.issue_claims(user_id, "", [])
+        #
+        # The platform privilege rides on this token as well as on the
+        # tenant-scoped one, because the admin surface is platform-wide and
+        # should not require picking a workspace first -- an operator
+        # investigating a tenant may not be a member of it. Sourced from the
+        # database on every mint, so revoking the flag takes effect at the next
+        # login or refresh rather than whenever the current token expires.
+        roles = [PLATFORM_ADMIN_ROLE] if await self._tenants.is_platform_admin(user_id) else []
+        token = await self._auth.issue_claims(user_id, "", roles)
         return {
             "access_token": token,
             "user_id": user_id,
