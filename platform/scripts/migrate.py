@@ -113,6 +113,12 @@ async def main() -> int:
     # --yes exists for CI, which cannot type, and is the only way past it.
     if not _is_local(dsn) and not dry_run and not assume_yes:
         print(f"\n  This will run DDL against a REMOTE database:\n\n    {host}\n")
+        if not sys.stdin.isatty():
+            # Nobody is there to answer. Refuse rather than raise EOFError, so
+            # the log says why it stopped instead of showing a traceback.
+            print("  Not a terminal. Pass --yes to migrate a remote database")
+            print("  from CI, where the pull request is the authorisation.")
+            return 1
         if input("  Type the host to continue: ").strip() != host:
             print("  Aborted.")
             return 1

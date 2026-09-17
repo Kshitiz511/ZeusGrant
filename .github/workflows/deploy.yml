@@ -69,7 +69,10 @@ jobs:
           # Shown first so the log records what was about to change, even if
           # the apply then fails part way.
           uv run --with asyncpg python scripts/migrate.py --dry-run
-          uv run --with asyncpg python scripts/migrate.py
+          # --yes is required because the runner cannot answer the confirmation
+          # prompt that guards remote databases. The review that authorises this
+          # apply is the pull request, not a keystroke.
+          uv run --with asyncpg python scripts/migrate.py --yes
 
       - name: Pull Vercel environment
         env:
