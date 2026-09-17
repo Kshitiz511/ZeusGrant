@@ -107,6 +107,34 @@ class BillingService:
                 ) from exc
         return self._provider_instance
 
+    def reset_provider(self) -> None:
+        """Drop the cached provider so the next call rebuilds it from settings.
+
+        The provider is built once and held, which is right for the request
+        path -- constructing a Stripe client per checkout would be waste. It is
+        wrong after a credential change: the container's settings overlay picks
+        up a rotated key within a minute, but this object would keep using the
+        client built from the old one until the process recycled. On a warm
+        serverless instance that is indefinite, so a rotation would appear to
+        have silently failed.
+
+        Called by the admin config route when a billing key is written. Note
+        what it does *not* do: nothing is invalidated across other instances,
+        so they still pick up the change via the settings refresh rather than
+        immediately. The instance the operator is talking to is the one that
+        needs to be right at once, because it is the one answering their
+        'test connection'.
+        """
+        self._provider_instance = None
+
+    async def test_connection(self) -> dict[str, object]:
+        """Ask the provider to prove its credentials work. Creates nothing."""
+        return await self._provider.test_connection()
+
+    async def get_price(self, price_id: str) -> dict[str, object] | None:
+        """Look up a price so an id can be checked before it is saved."""
+        return await self._provider.get_price(price_id)
+
     async def create_checkout(
         self, *, tenant_id: str, price_id: str, return_url: str, trial_days: int | None = None
     ) -> CheckoutSession:

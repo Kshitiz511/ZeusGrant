@@ -50,6 +50,54 @@ PATCHES: list[tuple[str, pathlib.Path, str, str]] = [
         '        "tenant.limit.set",',
         '        "tenant.limit.set.BREAK",',
     ),
+    # --- Phase 5b: catalogue and model prices --------------------------------
+    (
+        "a model price edit no longer clears the cache key (defect D7 returns)",
+        SRC / "routers/admin_catalog.py",
+        "    await container.cache.delete(price_cache_key(normalised))\n\n"
+        '    await audit_action(\n        container,\n        request,\n'
+        '        admin,\n        "model_price.set",',
+        '    await audit_action(  # BREAK\n        container,\n        request,\n'
+        '        admin,\n        "model_price.set",',
+    ),
+    (
+        "module_id becomes editable, silently re-granting a plan's subscribers",
+        SRC / "repositories/plans.py",
+        '        "is_active",\n    }\n)',
+        '        "is_active",\n        "module_id",  # BREAK\n    }\n)',
+    ),
+    (
+        "setting plan limits stops invalidating the subscribers' caches",
+        SRC / "routers/admin_catalog.py",
+        "    for tenant_id in affected:\n"
+        "        await container.entitlements.invalidate(tenant_id)",
+        "    for tenant_id in affected:  # BREAK\n        pass",
+    ),
+    (
+        "a price change stops warning that subscribers are not re-priced",
+        SRC / "routers/admin_catalog.py",
+        '        warnings.append(f"{PRICE_WARNING} {subscribers} subscriber(s) are unaffected.")',
+        "        pass  # BREAK",
+    ),
+    (
+        "an unrecognised Stripe price id is accepted in silence",
+        SRC / "routers/admin_catalog.py",
+        '        if price is None:\n            warnings.append(',
+        '        if False:  # BREAK\n            warnings.append(',
+    ),
+    (
+        "plan limits merge instead of being replaced, so a removed key survives",
+        SRC / "repositories/plans.py",
+        '        await self._db.execute("DELETE FROM platform.plan_limits '
+        'WHERE plan_id = $1", plan_id)',
+        "        pass  # BREAK",
+    ),
+    (
+        "test-connection no longer resets the provider, so a rotated key is untested",
+        SRC / "routers/admin_catalog.py",
+        "    container.billing.reset_provider()",
+        "    pass  # BREAK",
+    ),
 ]
 
 

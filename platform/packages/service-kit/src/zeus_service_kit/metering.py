@@ -38,11 +38,34 @@ import logging
 from dataclasses import dataclass
 from decimal import Decimal
 
-from zeus_adapters.interfaces import Database
+from zeus_adapters.interfaces import Cache, Database
 
 log = logging.getLogger(__name__)
 
 TOKENS_PER_MILLION = Decimal(1_000_000)
+
+#: Cache namespace for model prices. Shared with the admin router, which deletes
+#: keys under it when a price is edited.
+PRICE_CACHE_PREFIX = "modelprice:"
+
+#: Prices change when someone edits them, which is rare, so this is generous.
+#: It is a backstop, not the mechanism: the admin route deletes the key on write,
+#: so an edit is visible immediately. The TTL only bounds how long a *missed*
+#: invalidation can be wrong -- for instance if Redis was briefly unreachable
+#: during the edit.
+PRICE_CACHE_TTL_SECONDS = 900
+
+#: Stored in place of a price for a model that has no row. Without this, every
+#: call for an unpriced model would miss the cache and hit the database -- and
+#: an unpriced model is usually one that was *just* introduced and is being
+#: called in a loop, which is exactly when the extra load is least welcome.
+#: A plain empty string would be ambiguous with a corrupt entry.
+_NO_PRICE = "none"
+
+
+def price_cache_key(model: str) -> str:
+    """Cache key for one model's price. Callers must pass a normalised name."""
+    return f"{PRICE_CACHE_PREFIX}{model}"
 
 
 def normalise_model(model: str) -> str:
@@ -89,14 +112,49 @@ def compute_cost(
 
 
 class AiUsageRecorder:
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, cache: Cache | None = None) -> None:
         self._db = db
-        self._prices: dict[str, ModelPrice | None] = {}
+        self._cache = cache
 
     async def price_for(self, model: str) -> ModelPrice | None:
+        """The configured price for a model, or None if it has none.
+
+        Cached in the shared :class:`Cache` rather than on this instance.
+
+        The previous implementation memoised into ``self._prices``, a plain
+        dict with no expiry and no invalidation (defect D7). Because the
+        recorder is a ``cached_property`` on a container that lives as long as
+        the process, a price edited in the admin UI did not take effect until
+        the serverless instance happened to recycle -- which could be hours,
+        and differed per instance, so two identical calls could be costed
+        differently at the same moment. Moving it here means an edit deletes
+        one key and every instance sees the new price at once.
+
+        With no cache configured this reads through on every call. That is the
+        deliberate fallback: a single indexed lookup against one small table,
+        next to an LLM round trip measured in seconds, is not a cost worth
+        risking staleness for. Reading through is slower and always right; the
+        unbounded dict was faster and sometimes wrong.
+        """
         model = normalise_model(model)
-        if model in self._prices:
-            return self._prices[model]
+
+        if self._cache is not None:
+            cached = await self._cache.get(price_cache_key(model))
+            if cached == _NO_PRICE:
+                return None
+            if cached is not None:
+                try:
+                    raw_in, raw_out = cached.split(",", 1)
+                    return ModelPrice(
+                        input_per_million_usd=Decimal(raw_in),
+                        output_per_million_usd=Decimal(raw_out),
+                    )
+                except (ValueError, ArithmeticError):
+                    # An unparseable entry is treated as a miss rather than an
+                    # error. A malformed cache value must never be able to stop
+                    # a model call that has already been paid for.
+                    log.warning("metering.price_cache_corrupt model=%s", model)
+
         row = await self._db.fetch_one(
             "SELECT input_per_million_usd, output_per_million_usd "
             "FROM platform.model_pricing WHERE model = $1",
@@ -110,7 +168,16 @@ class AiUsageRecorder:
             if row
             else None
         )
-        self._prices[model] = price
+
+        if self._cache is not None:
+            value = (
+                _NO_PRICE
+                if price is None
+                else f"{price.input_per_million_usd},{price.output_per_million_usd}"
+            )
+            await self._cache.set(
+                price_cache_key(model), value, ttl_seconds=PRICE_CACHE_TTL_SECONDS
+            )
         return price
 
     async def record(

@@ -10,6 +10,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from zeus_adapters.cache.memory_cache import MemoryCache
 from zeus_service_kit.metering import AiUsageRecorder, ModelPrice, compute_cost
 
 PRICE = ModelPrice(
@@ -110,15 +111,33 @@ async def test_unpriced_model_still_records_the_tokens():
 
 
 @pytest.mark.asyncio
-async def test_price_lookup_is_cached_per_recorder():
+async def test_price_lookup_is_cached_in_the_shared_cache():
+    """Extraction fans out over chunks; a lookup per chunk would be pure waste.
+
+    The cache is now shared rather than per-recorder (defect D7) so that an
+    admin price edit is visible to every instance immediately. With no cache
+    supplied the recorder deliberately reads through -- one indexed lookup
+    against a tiny table is a price worth paying to never be wrong.
+    """
+    db = FakeDb({"input_per_million_usd": "1", "output_per_million_usd": "1"})
+    recorder = AiUsageRecorder(db, MemoryCache())
+    for _ in range(3):
+        await recorder.record(
+            tenant_id="t", module_id="m", operation="o", model="same", prompt_tokens=1
+        )
+    assert db.fetches == 1
+
+
+@pytest.mark.asyncio
+async def test_without_a_cache_the_recorder_reads_through():
+    """Slower and always right, rather than faster and sometimes stale."""
     db = FakeDb({"input_per_million_usd": "1", "output_per_million_usd": "1"})
     recorder = AiUsageRecorder(db)
     for _ in range(3):
         await recorder.record(
             tenant_id="t", module_id="m", operation="o", model="same", prompt_tokens=1
         )
-    # Extraction fans out over chunks; a lookup per chunk would be pure waste.
-    assert db.fetches == 1
+    assert db.fetches == 3
 
 
 @pytest.mark.asyncio

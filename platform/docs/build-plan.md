@@ -81,9 +81,10 @@ Eight plans carry a `team_seats` limit. Zero non-test code reads it. Invites mus
 `membership:{user}:{tenant}` has a 60 s TTL and no explicit delete. Removing a member leaves them with access for up to 60 s.
 **Fix in Phase 1** (delete the key on role change and removal).
 
-### D7 — Model price cache has no TTL and no invalidation
-`AiUsageRecorder._prices` is a plain in-process dict on a `@cached_property` container. A price edit is only picked up on process restart. On serverless that is "whenever the instance recycles" — unpredictable.
-**Fix in Phase 5**, when prices become admin-editable.
+### D7 — Model price cache has no TTL and no invalidation — **CLOSED (Phase 5b)**
+`AiUsageRecorder._prices` is a plain in-process dict on a `@cached_property` container. A price edit is only picked up on process restart. On serverless that is "whenever the instance recycles" — unpredictable, and different per instance, so two identical calls could be costed differently at the same moment.
+**Fixed in Phase 5b.** The memo is gone. `price_for` now reads through the shared `Cache` under the `modelprice:` prefix with a 900 s TTL, and `PUT`/`DELETE /admin/models/{model}` delete the key on write, so an edit is visible to every instance at once. A model with no price is cached as an explicit `none` sentinel rather than a miss, so an unpriced model does not pay for a round trip on every call. A corrupt cache entry is treated as a miss and logged, never as an error — a malformed cache value must not be able to fail a model call that has already been paid for. Where no cache is configured the recorder deliberately reads through on every call: one indexed lookup against a tiny table is slower and always right, which is the trade the old dict got backwards.
+Verified by removing the `cache.delete` in `break_test_phase5.py` and watching the test fail.
 
 ### D8 — Two divergent `ai_usage` tables
 `platform.ai_usage` (real tokens, `cost_usd`, append-only) and `contract_compliance.ai_usage` (estimated tokens, no cost, FORCE RLS). Reporting off the wrong one gives wrong numbers.
@@ -123,9 +124,11 @@ Not a live exploit: no tenant-scoped route currently reads them unfiltered. Reco
 The e2e scripts create accounts, grant platform-admin rights and suspend tenants. They took their target from `ZEUS_DATABASE_URL` and the API from `API`, with no check on either. During Phase 5a a shell had `ZEUS_DATABASE_URL` exported to Supabase; a locally-launched uvicorn inherited it and a probe signup created a real user and tenant **in production** before failing on the not-yet-deployed migration. Rows were removed.
 **Fixed in Phase 5a.** Both `e2e_tenant_suspension.py` and `e2e_platform_admin.py` now refuse to start unless the DSN host and the API host are local. Verified by running with the production DSN still exported and watching the refusal.
 
-### D15 — Stripe price ids are placeholders
+### D15 — Stripe price ids are placeholders — **PARTIALLY CLOSED (Phase 5b)**
 All 15 seeded plans carry ids like `gi_starter_monthly`. These are not live Stripe ids. Checkout cannot work for a real purchase until they are replaced.
-**Fix in Phase 5.**
+**Phase 5b supplied the means, not the data.** `PATCH /admin/plans/{id}` can now set the real ids, and `_validate_price_ids` checks each one against Stripe on save — reporting an id Stripe does not recognise, an archived price, an amount that disagrees with the catalogue figure, or a billing interval that does not match the column it was put in.
+Validation **warns rather than refuses**, deliberately. A hard check would make the catalogue uneditable while the placeholders are still in place (the exact state this defect describes), and would block edits whenever Stripe is unreachable or unconfigured. Reporting loudly and saving anyway keeps the operator in control while making a typo impossible to miss.
+The remaining work is data entry against a real Stripe account, which cannot be done from here. `GET /admin/plans` returns `unsellable_active_plans` so the outstanding set is visible on the screen rather than having to be inferred from a storefront that silently drops them.
 
 ---
 
@@ -494,30 +497,46 @@ The break-test harness earned its keep immediately: it found that the override a
 ### 8.1b Tenant management — remaining
 Usage and cost series are not yet on the detail response; the list shows member, module and override counts only. Deferred to Phase 8 when the screen that consumes them is built, rather than guessing at the shape now.
 
-### 8.2 Pricing and plans (fixes D15)
+### 8.2 Pricing and plans (fixes D15) — **DONE (Phase 5b)**
 ```
-GET    /admin/plans
+GET    /admin/plans                  list + unsellable_active_plans
+GET    /admin/plans/{id}
+POST   /admin/plans                  409 on a taken id, never an overwrite
 PATCH  /admin/plans/{id}             name, prices, stripe ids, is_active
-PUT    /admin/plans/{id}/limits      limit keys
-POST   /admin/plans                  new plan
+PUT    /admin/plans/{id}/limits      replaces the limit set wholesale
+POST   /admin/billing/test-connection
 ```
-**Guardrails that must exist:**
-- Changing a price must not silently re-price existing subscribers — Stripe governs what they pay. The DB price is the *catalogue*. Make this explicit in the UI or you will misprice someone.
-- Deactivating a plan must not revoke access for current subscribers.
-- A plan with no Stripe price id cannot be offered for checkout (the repo already filters this).
-- Price ids must be validated against Stripe before saving, or a typo breaks checkout silently.
+**How the guardrails were met, and the reasoning behind each:**
 
-### 8.3 Models and AI
+- *Changing a price must not silently re-price existing subscribers.* It does not, and the API says so rather than relying on the operator knowing. Every price-changing response carries `PRICE_WARNING` with the **concrete subscriber count** — "3 subscriber(s) are unaffected" reads as a fact about their data; generic boilerplate is something people learn to skip. The failure being prevented is an operator believing they have given a discount they have not given.
+- *Deactivating a plan must not revoke access.* `is_active` controls whether the plan is *offered*; entitlements come from the subscription, so subscribers keep exactly what they bought. That is the right behaviour and it is not what "deactivate" sounds like, so `DEACTIVATE_WARNING` states it.
+- *A plan with no Stripe price id cannot be offered for checkout.* Already true in the storefront query, and the consequence was that such a plan silently vanished from `/billing/plans` — which from outside looks like the pricing page being broken. `GET /admin/plans` now names the condition in `unsellable_active_plans`.
+- *Price ids validated against Stripe before saving.* Done, as **warnings not errors** — see D15 for why refusing the save would be worse than accepting it.
+
+**Two further decisions, neither of which the spec asked for:**
+
+- `module_id` is **not editable**. Moving a plan between modules would change what every existing subscriber is entitled to with no billing event anywhere. That is not an edit, it is a silent re-grant. `EDITABLE_PLAN_COLUMNS` is a frozen set and the `SET` clause is built from it, never from caller input — a caller-supplied column name reaching that f-string would be SQL injection through the admin API.
+- `PATCH` uses `model_dump(exclude_unset=True)`, so `null` is distinguishable from omitted. Without that there is no way to *clear* a Stripe id, and a plan wrongly marked sellable could never be corrected.
+
+Plan limits **replace** rather than merge (a key the caller omitted is a key the plan no longer has) whereas per-tenant overrides merge — one is the plan's definition, the other an adjustment to it. Limits *do* apply to existing subscribers immediately, so every affected tenant's cached entitlement is invalidated; otherwise the change appears to do nothing until the TTL lapses and the operator applies it twice.
+
+### 8.3 Models and AI — **DONE (Phase 5b)**
 ```
-GET    /admin/models
+GET    /admin/models                 priced models + unpriced_models
 PUT    /admin/models/{model}         input/output price per million
 DELETE /admin/models/{model}
 ```
-Plus extending `MANAGED_KEYS` beyond the current five: LLM timeout, max attempts, chunk chars, max chunks, breaker thresholds.
+`unpriced_models` — models being called with no price row — is the point of the screen, not a footnote. Every call to one records NULL cost, so its spend is invisible in every rollup: the exact condition that hides a runaway bill. It is returned alongside the priced list rather than behind a separate endpoint so it cannot be missed, and `DELETE` warns in those terms rather than returning a bare 204.
 
-**Fix D7:** the price cache must gain a TTL and an invalidation hook, or a price edit does not take effect until the serverless instance recycles. Move it into the `Cache` adapter with an explicit prefix and TTL, and delete the key on write.
+Model names are normalised with the same `normalise_model` the metering read path uses. Storing the raw string would let a price be saved under a spelling the recorder never looks up — the operator sees their edit accepted and their costs stay NULL, which is indistinguishable from having made no edit at all.
 
-**Fix D14:** correct `BOOTSTRAP_KEYS` to name `ZEUS_SUPABASE_JWT_SECRET`.
+Prices accept zero (`ge=0`, not `gt=0`): a genuinely free model is real, and rejecting zero forces an operator to either lie or leave it unpriced, and unpriced records NULL, which is worse.
+
+**Fix D7:** done — see D7.
+
+**Extending `MANAGED_KEYS`** (LLM timeout, max attempts, chunk chars, max chunks, breaker thresholds) is **deferred to §8.4**, which is where the bounds work lives. Adding managed keys without the bounds is the part of that change that can do harm.
+
+**Fix D14:** done in Phase 5a.
 
 ### 8.4 Cache TTL control
 Current TTLs are compile-time constants:
@@ -532,16 +551,22 @@ Current TTLs are compile-time constants:
 
 To make these admin-controlled they must become managed keys read through `RuntimeConfigService`. **Guardrail:** bound every one (e.g. membership 10–300 s). An admin who sets an authorization cache to 24 hours has created a security hole, so the bound is not optional. Also add a "flush cache" action per prefix.
 
-### 8.5 Stripe key rotation
-Rotating `stripe_secret_key` while requests are in flight must not break them. The billing provider is built per-container; confirm a key change is picked up, and surface a "test connection" action so a bad key is caught at save time rather than at the next checkout.
+### 8.5 Stripe key rotation — **half done (Phase 5b)**
+Rotating `stripe_secret_key` while requests are in flight must not break them. `BillingService._provider_instance` was cached for the life of the container, so on a warm instance a rotated key was never picked up — and, worse, a "test connection" built on the cached provider would confidently report success for a key no longer in use.
+
+`reset_provider()` now exists and `POST /admin/billing/test-connection` calls it before probing, so the check tests the key that is *currently* configured. The probe is `Account.retrieve` — the cheapest authenticated read Stripe offers, needs no arguments, creates nothing, and fails only if the credentials are bad. It reports `livemode`, because the most expensive Stripe mistake is not a broken key but a working *test* key in production, which accepts every checkout and charges nobody.
+
+A failure returns **200 with `ok: false`**, not a 5xx. This is a diagnostic: the request succeeded and the answer is that the credentials do not work. Raising would make "your Stripe key is wrong" indistinguishable in logs and alerting from "the admin API is broken", and those are acted on very differently.
+
+**Outstanding for 5c:** confirming that a key rotated through `RuntimeConfigService` actually takes effect on a warm instance without an admin explicitly pressing test-connection first.
 
 ### Exit criteria
-- [ ] Tenant list, detail, suspend/activate, limit override all work end to end
-- [ ] Plan and price edits reflect in `/billing/plans` immediately
-- [ ] Model price edit takes effect without a restart (D7 closed)
-- [ ] TTL bounds enforced and tested
-- [ ] Every mutation audited
-- [ ] D7, D14, D15 closed
+- [x] Tenant list, detail, suspend/activate, limit override all work end to end
+- [x] Plan and price edits reflect in `/billing/plans` immediately
+- [x] Model price edit takes effect without a restart (D7 closed)
+- [ ] TTL bounds enforced and tested — Phase 5c
+- [x] Every mutation audited
+- [x] D7, D14 closed; D15 closed as far as code can close it (see D15)
 
 ---
 

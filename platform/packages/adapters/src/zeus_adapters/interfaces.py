@@ -145,6 +145,29 @@ class BillingProvider(ABC):
     def parse_webhook(self, payload: bytes, signature: str) -> EntitlementChange:
         """Verify signature and normalize the event into an EntitlementChange."""
 
+    @abstractmethod
+    async def get_price(self, price_id: str) -> dict[str, Any] | None:
+        """Look up one price, or None if the provider does not have it.
+
+        Exists so a price id can be checked *before* it is saved to the plan
+        catalogue. Without it a typo is only discovered when a real customer
+        reaches checkout and it fails -- at the worst possible moment, and
+        attributed to the customer rather than to the edit that caused it.
+
+        Returns the provider's own fields (amount, currency, interval, active)
+        so the caller can also warn when a valid id does not match the price
+        the plan claims to charge.
+        """
+
+    @abstractmethod
+    async def test_connection(self) -> dict[str, Any]:
+        """Prove the configured credentials work, without side effects.
+
+        Called from the admin UI after a key is entered or rotated, so a bad
+        key surfaces at save time rather than at the next customer's checkout.
+        Must not create anything.
+        """
+
 
 class EmailSender(ABC):
     """Transactional email delivery.

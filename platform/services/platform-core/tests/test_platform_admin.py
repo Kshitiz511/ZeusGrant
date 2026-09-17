@@ -147,6 +147,33 @@ ADMIN_ROUTES = [
         None,
         "/admin/tenants/{tenant_id}/limits/{limit_key}",
     ),
+    # Catalogue control (Phase 5b). Editing a price or a plan limit changes
+    # what every customer is charged and allowed, so it belongs behind the
+    # same sweep.
+    ("get", "/admin/plans", None, "/admin/plans"),
+    ("get", "/admin/plans/gi_growth", None, "/admin/plans/{plan_id}"),
+    (
+        "post",
+        "/admin/plans",
+        {"id": "x", "module_id": "m", "name": "X", "monthly_cents": 1, "annual_cents": 1},
+        "/admin/plans",
+    ),
+    ("patch", "/admin/plans/gi_growth", {"name": "X"}, "/admin/plans/{plan_id}"),
+    (
+        "put",
+        "/admin/plans/gi_growth/limits",
+        {"limits": {"scans_per_month": 10}},
+        "/admin/plans/{plan_id}/limits",
+    ),
+    ("get", "/admin/models", None, "/admin/models"),
+    (
+        "put",
+        "/admin/models/gpt-5-mini",
+        {"input_per_million_usd": "1", "output_per_million_usd": "2"},
+        "/admin/models/{model}",
+    ),
+    ("delete", "/admin/models/gpt-5-mini", None, "/admin/models/{model}"),
+    ("post", "/admin/billing/test-connection", None, "/admin/billing/test-connection"),
 ]
 
 
@@ -181,12 +208,12 @@ def test_the_admin_router_has_no_unguarded_routes():
     nobody added to this tuple would be invisible to the sweep, so the tuple is
     the one thing a reviewer has to check when a new admin router appears.
     """
-    from zeus_platform_core.routers import admin, admin_tenants
+    from zeus_platform_core.routers import admin, admin_catalog, admin_tenants
 
     listed = {(m.lower(), template) for m, _, _, template in ADMIN_ROUTES}
     actual = {
         (method.lower(), route.path)
-        for module in (admin, admin_tenants)
+        for module in (admin, admin_catalog, admin_tenants)
         for route in module.router.routes
         for method in getattr(route, "methods", set())
         if method != "HEAD"

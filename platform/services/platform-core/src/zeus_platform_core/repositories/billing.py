@@ -101,6 +101,21 @@ class SubscriptionRepository:
         )
         return row["stripe_customer_id"] if row else None
 
+    async def tenant_ids_on_plan(self, plan_id: str) -> list[str]:
+        """Tenants currently subscribed to a plan, for cache invalidation.
+
+        Includes every status, not just the access-granting ones. A cached
+        snapshot exists for past_due and cancelled tenants too, and leaving
+        theirs stale would mean a limit change appeared to work for some
+        customers and not others -- the hardest kind of bug to be told about.
+        """
+        rows = await self._db.fetch(
+            "SELECT DISTINCT tenant_id::text AS tenant_id "
+            "FROM platform.subscriptions WHERE plan_id = $1",
+            plan_id,
+        )
+        return [row["tenant_id"] for row in rows]
+
 
 class BillingEventRepository:
     """Ledger of processed Stripe events, making webhook handling idempotent.

@@ -156,7 +156,7 @@ class Container:
         estimate and no output tokens or cost, and being module-scoped it could
         not answer the owner's cross-tenant question at all.
         """
-        return AiUsageRecorder(self.db)
+        return AiUsageRecorder(self.db, self.cache)
 
     @cached_property
     def extraction(self) -> ExtractionService:

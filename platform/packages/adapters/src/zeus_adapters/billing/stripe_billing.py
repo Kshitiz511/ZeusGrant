@@ -83,6 +83,64 @@ class StripeBillingProvider(BillingProvider):
         )
         return session.url
 
+    async def get_price(self, price_id: str) -> dict[str, Any] | None:
+        """Retrieve one price, or None if Stripe does not recognise the id.
+
+        Only a missing price returns None. Anything else -- a revoked key, a
+        network failure, Stripe being down -- is raised, because "we could not
+        check" and "it does not exist" must not produce the same answer. If
+        they did, an outage would look like a bad price id and an operator
+        would 'fix' a correct configuration.
+        """
+
+        def _fetch():
+            try:
+                return self._stripe.Price.retrieve(price_id)
+            except self._stripe.error.InvalidRequestError as exc:
+                # Stripe uses InvalidRequestError both for "no such price" and
+                # for genuinely malformed calls, so the code is checked rather
+                # than swallowing the whole class.
+                if getattr(exc, "code", None) == "resource_missing":
+                    return None
+                raise
+
+        price = await asyncio.to_thread(_fetch)
+        if price is None:
+            return None
+
+        recurring = price.get("recurring") or {}
+        return {
+            "id": price.get("id"),
+            "active": price.get("active"),
+            "currency": price.get("currency"),
+            "unit_amount": price.get("unit_amount"),
+            "interval": recurring.get("interval"),
+            "product": price.get("product")
+            if isinstance(price.get("product"), str)
+            else (price.get("product") or {}).get("id"),
+            "livemode": price.get("livemode"),
+        }
+
+    async def test_connection(self) -> dict[str, Any]:
+        """Confirm the key is valid by reading the account. Creates nothing.
+
+        ``Account.retrieve`` is the cheapest authenticated read Stripe offers
+        and needs no arguments, which makes it the right probe: it fails only
+        if the credentials are bad.
+
+        ``livemode`` is reported because the most expensive Stripe mistake is
+        not a broken key but a working *test* key in production, which accepts
+        every checkout and charges nobody.
+        """
+        account = await asyncio.to_thread(lambda: self._stripe.Account.retrieve())
+        api_key = self._stripe.api_key or ""
+        return {
+            "ok": True,
+            "account_id": account.get("id"),
+            "livemode": api_key.startswith("sk_live"),
+            "business_name": (account.get("business_profile") or {}).get("name"),
+        }
+
     def parse_webhook(self, payload: bytes, signature: str) -> EntitlementChange:
         """Verify the signature and normalize the event.
 

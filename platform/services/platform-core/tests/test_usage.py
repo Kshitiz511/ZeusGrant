@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from zeus_adapters.cache.memory_cache import MemoryCache
 from zeus_adapters.db.fake_db import FakeDatabase
 from zeus_platform_core.repositories.usage import UsageRepository
 from zeus_service_kit.metering import (
@@ -20,6 +21,7 @@ from zeus_service_kit.metering import (
     ModelPrice,
     compute_cost,
     normalise_model,
+    price_cache_key,
 )
 
 TENANT = "11111111-1111-1111-1111-111111111111"
@@ -61,8 +63,15 @@ async def test_a_provider_qualified_model_finds_its_price() -> None:
 
 
 async def test_the_price_cache_is_keyed_on_the_normalised_name() -> None:
-    """Otherwise the same model is looked up once per spelling."""
+    """Otherwise the same model is looked up once per spelling.
+
+    The cache is shared (a ``Cache``, not a per-instance dict) so that an
+    admin price edit takes effect everywhere at once -- defect D7. This
+    asserts the three spellings collapse onto one key, and does it through a
+    second recorder to prove the entry really is shared rather than memoised.
+    """
     db = FakeDatabase()
+    cache = MemoryCache()
     calls = {"n": 0}
 
     def _price(args):
@@ -70,13 +79,73 @@ async def test_the_price_cache_is_keyed_on_the_normalised_name() -> None:
         return {"input_per_million_usd": "0.25", "output_per_million_usd": "2.00"}
 
     db.on_fetch_one("FROM platform.model_pricing", _price)
-    recorder = AiUsageRecorder(db)
 
-    await recorder.price_for("gpt-5-mini")
-    await recorder.price_for("openai:gpt-5-mini")
-    await recorder.price_for("GPT-5-MINI")
+    await AiUsageRecorder(db, cache).price_for("gpt-5-mini")
+    await AiUsageRecorder(db, cache).price_for("openai:gpt-5-mini")
+    await AiUsageRecorder(db, cache).price_for("GPT-5-MINI")
 
     assert calls["n"] == 1
+
+
+async def test_deleting_the_cache_key_makes_a_price_edit_visible() -> None:
+    """The point of D7: an edit must not wait for the instance to recycle."""
+    db = FakeDatabase()
+    cache = MemoryCache()
+    prices = {"in": "0.25"}
+    db.on_fetch_one(
+        "FROM platform.model_pricing",
+        lambda args: {
+            "input_per_million_usd": prices["in"],
+            "output_per_million_usd": "2.00",
+        },
+    )
+    recorder = AiUsageRecorder(db, cache)
+
+    first = await recorder.price_for("gpt-5-mini")
+    prices["in"] = "9.00"
+    assert first is not None
+    # Still the old price: that is the cache doing its job, not the bug.
+    stale = await recorder.price_for("gpt-5-mini")
+    assert stale is not None and stale.input_per_million_usd == Decimal("0.25")
+
+    await cache.delete(price_cache_key("gpt-5-mini"))
+
+    fresh = await recorder.price_for("gpt-5-mini")
+    assert fresh is not None and fresh.input_per_million_usd == Decimal("9.00")
+
+
+async def test_a_model_with_no_price_is_cached_as_absent() -> None:
+    """Otherwise every unpriced call pays for a database round trip."""
+    db = FakeDatabase()
+    cache = MemoryCache()
+    calls = {"n": 0}
+
+    def _none(args):
+        calls["n"] += 1
+        return None
+
+    db.on_fetch_one("FROM platform.model_pricing", _none)
+    recorder = AiUsageRecorder(db, cache)
+
+    assert await recorder.price_for("unpriced") is None
+    assert await recorder.price_for("unpriced") is None
+    assert calls["n"] == 1
+
+
+async def test_a_corrupt_cache_entry_falls_back_to_the_database() -> None:
+    """A bad cache value must never fail a call the customer already paid for."""
+    db = FakeDatabase()
+    cache = MemoryCache()
+    db.on_fetch_one(
+        "FROM platform.model_pricing",
+        lambda args: {"input_per_million_usd": "0.25", "output_per_million_usd": "2"},
+    )
+    await cache.set(price_cache_key("gpt-5-mini"), "not-a-price")
+
+    price = await AiUsageRecorder(db, cache).price_for("gpt-5-mini")
+
+    assert price is not None
+    assert price.input_per_million_usd == Decimal("0.25")
 
 
 # --- cost arithmetic -------------------------------------------------------

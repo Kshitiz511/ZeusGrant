@@ -53,7 +53,10 @@ from zeus_platform_core.repositories.billing import (
 )
 from zeus_platform_core.repositories.config_registry import ConfigRepository, PromptRepository
 from zeus_platform_core.repositories.opportunities import OpportunityRepository
-from zeus_platform_core.repositories.plans import PlanRepository
+from zeus_platform_core.repositories.plans import (
+    ModelPricingRepository,
+    PlanRepository,
+)
 from zeus_platform_core.repositories.sessions import SessionRepository
 from zeus_platform_core.repositories.tenants import TenantRepository
 from zeus_platform_core.repositories.usage import UsageRepository
@@ -167,6 +170,10 @@ class Container:
     @cached_property
     def plans(self) -> PlanRepository:
         return PlanRepository(self.db)
+
+    @cached_property
+    def model_pricing(self) -> ModelPricingRepository:
+        return ModelPricingRepository(self.db)
 
     @cached_property
     def entitlement_repo(self) -> EntitlementRepository:
@@ -377,10 +384,14 @@ class Container:
         Same recorder the module services use, pointed at the same
         ``platform.ai_usage`` table, so the owner's spend figure is one query
         rather than a union that grows with each module.
+
+        The cache is passed so model prices are shared and invalidatable. It
+        is not optional in practice: without it an admin price edit would not
+        reach a warm instance until it recycled (D7).
         """
         from zeus_service_kit.metering import AiUsageRecorder
 
-        return AiUsageRecorder(self.db)
+        return AiUsageRecorder(self.db, self.cache)
 
     @cached_property
     def usage(self) -> UsageRepository:
