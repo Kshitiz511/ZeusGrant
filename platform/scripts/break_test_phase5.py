@@ -98,6 +98,69 @@ PATCHES: list[tuple[str, pathlib.Path, str, str]] = [
         "    container.billing.reset_provider()",
         "    pass  # BREAK",
     ),
+    # --- Phase 5c: bounds, live TTLs, cache flush, key rotation --------------
+    (
+        "the membership TTL loses its ceiling, so an auth cache can be set to a day",
+        SRC / "services/runtime_config.py",
+        '        env_var="ZEUS_CACHE_MEMBERSHIP_TTL_SECONDS",\n'
+        '        settings_path="cache.membership_ttl_seconds",\n'
+        '        value_type="int",\n'
+        "        minimum=10,\n"
+        "        maximum=300,",
+        '        env_var="ZEUS_CACHE_MEMBERSHIP_TTL_SECONDS",\n'
+        '        settings_path="cache.membership_ttl_seconds",\n'
+        '        value_type="int",\n'
+        "        minimum=10,\n"
+        "        maximum=None,  # BREAK",
+    ),
+    (
+        "bounds stop being checked on write, so a bad value reaches the database",
+        SRC / "services/runtime_config.py",
+        "        spec.validate(value)\n        await self._config.set(",
+        "        await self._config.set(  # BREAK",
+    ),
+    (
+        "an out-of-bounds stored value is trusted on the read path",
+        SRC / "services/runtime_config.py",
+        "        if stored is not None and not spec.in_range(stored):",
+        "        if False:  # BREAK",
+    ),
+    (
+        "the entitlements TTL is captured once instead of read per write",
+        SRC / "services/entitlements_service.py",
+        "            ttl_seconds=self._ttl_seconds(),",
+        "            ttl_seconds=_DEFAULT_TTL_SECONDS,  # BREAK",
+    ),
+    (
+        "the model price TTL is captured once instead of read per write",
+        SRC.parents[3] / "packages/service-kit/src/zeus_service_kit/metering.py",
+        "                price_cache_key(model), value, ttl_seconds=self._ttl_seconds()",
+        "                price_cache_key(model), value, ttl_seconds=PRICE_CACHE_TTL_SECONDS",
+    ),
+    (
+        "the cache flush accepts any prefix, so a wildcard can sign everyone out",
+        SRC / "routers/admin.py",
+        "    if prefix not in FLUSHABLE_PREFIXES:",
+        "    if False:  # BREAK",
+    ),
+    (
+        "the cache flush is no longer audited",
+        SRC / "routers/admin.py",
+        '        "cache.flushed",',
+        '        "cache.flushed.BREAK",',
+    ),
+    (
+        "rotating a Stripe key no longer rebuilds the client (the 8.5 gap returns)",
+        SRC / "routers/admin.py",
+        "    if not key.startswith(\"billing.\"):\n        return",
+        "    if True:  # BREAK\n        return",
+    ),
+    (
+        "settings stop refreshing on the request path (defect D18 returns)",
+        SRC / "app.py",
+        "        await request.app.state.container.effective_settings()",
+        "        pass  # BREAK",
+    ),
 ]
 
 

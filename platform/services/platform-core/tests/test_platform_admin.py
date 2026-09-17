@@ -174,6 +174,10 @@ ADMIN_ROUTES = [
     ),
     ("delete", "/admin/models/gpt-5-mini", None, "/admin/models/{model}"),
     ("post", "/admin/billing/test-connection", None, "/admin/billing/test-connection"),
+    # Cache control (Phase 5c). Flushing entitlements or membership resets
+    # authorisation decisions for everyone, so it is guarded like a mutation.
+    ("get", "/admin/cache/prefixes", None, "/admin/cache/prefixes"),
+    ("post", "/admin/cache/flush", {"prefix": "cfg:"}, "/admin/cache/flush"),
 ]
 
 

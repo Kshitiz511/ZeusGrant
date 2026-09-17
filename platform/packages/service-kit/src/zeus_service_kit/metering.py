@@ -35,6 +35,7 @@ modules only ever insert.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -112,9 +113,18 @@ def compute_cost(
 
 
 class AiUsageRecorder:
-    def __init__(self, db: Database, cache: Cache | None = None) -> None:
+    def __init__(
+        self,
+        db: Database,
+        cache: Cache | None = None,
+        ttl_seconds: Callable[[], int] | None = None,
+    ) -> None:
         self._db = db
         self._cache = cache
+        # A callable for the same reason the cache replaced the dict: this
+        # object outlives any request, so a value captured at construction
+        # would be pinned to boot time.
+        self._ttl_seconds = ttl_seconds or (lambda: PRICE_CACHE_TTL_SECONDS)
 
     async def price_for(self, model: str) -> ModelPrice | None:
         """The configured price for a model, or None if it has none.
@@ -176,7 +186,7 @@ class AiUsageRecorder:
                 else f"{price.input_per_million_usd},{price.output_per_million_usd}"
             )
             await self._cache.set(
-                price_cache_key(model), value, ttl_seconds=PRICE_CACHE_TTL_SECONDS
+                price_cache_key(model), value, ttl_seconds=self._ttl_seconds()
             )
         return price
 

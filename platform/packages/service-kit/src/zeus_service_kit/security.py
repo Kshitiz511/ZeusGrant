@@ -11,6 +11,7 @@ gateway bug can never expose a module a tenant did not buy.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, Security, status
@@ -28,7 +29,10 @@ _CACHE_PREFIX = "entitlements:"
 _MEMBER_PREFIX = "membership:"
 #: Short by design. This is an authorisation decision, so the cost of it being
 #: stale is someone keeping access to a workspace they were just removed from.
-_MEMBER_TTL = 60
+#: Used only when no provider is supplied; the running system reads the
+#: admin-managed ``cache.membership_ttl_seconds``, capped at 300s for exactly
+#: this reason.
+_DEFAULT_MEMBER_TTL = 60
 
 _bearer = HTTPBearer(auto_error=False, description="Supabase/GoTrue JWT")
 
@@ -46,10 +50,21 @@ class ServiceSecurity:
     ``app.state``. The dependency factories read the instance off the request.
     """
 
-    def __init__(self, *, auth: AuthProvider, cache: Cache, db: Database) -> None:
+    def __init__(
+        self,
+        *,
+        auth: AuthProvider,
+        cache: Cache,
+        db: Database,
+        member_ttl_seconds: Callable[[], int] | None = None,
+    ) -> None:
         self.auth = auth
         self.cache = cache
         self.db = db
+        # Read per call rather than captured, so an admin lowering the window
+        # after removing somebody takes effect on the instance already running
+        # instead of waiting for it to recycle.
+        self._member_ttl = member_ttl_seconds or (lambda: _DEFAULT_MEMBER_TTL)
 
     # --- claims resolution ---
     async def claims_for(self, tenant_id: str) -> dict:
@@ -97,7 +112,7 @@ class ServiceSecurity:
         member = row is not None
         # A negative is cached too, so a scripted sweep of tenant ids costs
         # one query rather than one per attempt.
-        await self.cache.set(key, "1" if member else "0", ttl_seconds=_MEMBER_TTL)
+        await self.cache.set(key, "1" if member else "0", ttl_seconds=self._member_ttl())
         return member
 
 

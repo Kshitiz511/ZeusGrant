@@ -7,6 +7,8 @@ claims, so access checks are a single fast lookup with a DB fallback.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from zeus_adapters.interfaces import Cache
 
 from zeus_platform_core.domain.entitlements import compute_claims
@@ -16,7 +18,10 @@ from zeus_platform_core.repositories.plans import PlanRepository
 from zeus_platform_core.repositories.tenants import TenantRepository
 
 _CACHE_PREFIX = "entitlements:"
-_CACHE_TTL_SECONDS = 300
+#: Used only when no TTL provider is supplied, which in practice means a test.
+#: The running system reads ``cache.entitlements_ttl_seconds``, which is
+#: admin-editable and bounded.
+_DEFAULT_TTL_SECONDS = 300
 
 
 def _cache_key(tenant_id: str) -> str:
@@ -32,12 +37,20 @@ class EntitlementsService:
         entitlements: EntitlementRepository,
         tenants: TenantRepository,
         cache: Cache,
+        ttl_seconds: Callable[[], int] | None = None,
     ) -> None:
         self._subscriptions = subscriptions
         self._plans = plans
         self._entitlements = entitlements
         self._tenants = tenants
         self._cache = cache
+        # A callable, not an int. This service is a cached_property on a
+        # container that outlives any single request, so a value read at
+        # construction time would pin the TTL to whatever it was when the
+        # instance booted -- exactly the staleness defect D7 was about. Reading
+        # it per write means an admin edit applies without waiting for a
+        # recycle.
+        self._ttl_seconds = ttl_seconds or (lambda: _DEFAULT_TTL_SECONDS)
 
     async def get_claims(self, tenant_id: str, *, use_cache: bool = True) -> EntitlementClaims:
         if use_cache:
@@ -73,15 +86,18 @@ class EntitlementsService:
 
         await self._entitlements.save(claims)
         await self._cache.set(
-            _cache_key(tenant_id), claims.model_dump_json(), ttl_seconds=_CACHE_TTL_SECONDS
+            _cache_key(tenant_id),
+            claims.model_dump_json(),
+            ttl_seconds=self._ttl_seconds(),
         )
         return claims
 
     async def invalidate(self, tenant_id: str) -> None:
         """Drop the cached snapshot so the next read recomputes.
 
-        Callers that change access must call this, not merely rely on the 300s
-        TTL. Suspension in particular has to bite immediately; five minutes of
-        continued access to a tenant somebody just cut off is not acceptable.
+        Callers that change access must call this, not merely rely on the TTL.
+        Suspension in particular has to bite immediately; minutes of continued
+        access to a tenant somebody just cut off is not acceptable. The TTL is
+        the bound on an instance that missed this call, not the mechanism.
         """
         await self._cache.delete(_cache_key(tenant_id))

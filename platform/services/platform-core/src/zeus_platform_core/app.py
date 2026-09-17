@@ -45,6 +45,28 @@ def create_app(container: Container | None = None) -> FastAPI:
     )
     app.state.container = container or Container()
 
+    @app.middleware("http")
+    async def _refresh_settings(request, call_next):
+        """Re-resolve admin-managed settings on the request path.
+
+        Without this the refresh never happens. ``startup()`` resolved the
+        overlay once and nothing called it again, so a warm instance served its
+        boot-time settings indefinitely: an admin edit reached the one instance
+        that handled the write and no other, and on serverless that instance
+        may never handle another request. Every managed key was affected, not
+        only the billing credentials that made it visible (defect D18).
+
+        The call is cheap when warm -- a monotonic clock comparison and an
+        early return -- so this costs a comparison per request to make the
+        documented behaviour true.
+
+        Failure is swallowed by ``effective_settings`` itself, which serves the
+        previous snapshot. Losing an override is recoverable; refusing to serve
+        is not.
+        """
+        await request.app.state.container.effective_settings()
+        return await call_next(request)
+
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(tenancy_router)

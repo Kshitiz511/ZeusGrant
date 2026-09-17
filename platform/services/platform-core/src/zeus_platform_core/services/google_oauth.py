@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import secrets
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -60,12 +61,16 @@ class GoogleOAuthService:
         redirect_uri: str,
         cache: Any,
         http_timeout: float = 10.0,
+        state_ttl_seconds: Callable[[], int] | None = None,
     ) -> None:
         self._client_id = client_id
         self._client_secret = client_secret
         self._redirect_uri = redirect_uri
         self._cache = cache
         self._timeout = http_timeout
+        # Read per sign-in rather than captured, so shortening the window after
+        # a suspected state leak takes effect at once.
+        self._state_ttl = state_ttl_seconds or (lambda: STATE_TTL_SECONDS)
 
     # --- Step 1: send the user to Google ------------------------------------
     async def begin(self) -> tuple[str, str]:
@@ -79,7 +84,7 @@ class GoogleOAuthService:
         """
         state = secrets.token_urlsafe(32)
         nonce = secrets.token_urlsafe(16)
-        await self._cache.set(f"oauth:google:{state}", nonce, ttl_seconds=STATE_TTL_SECONDS)
+        await self._cache.set(f"oauth:google:{state}", nonce, ttl_seconds=self._state_ttl())
 
         params = {
             "client_id": self._client_id,

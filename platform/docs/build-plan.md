@@ -130,6 +130,13 @@ All 15 seeded plans carry ids like `gi_starter_monthly`. These are not live Stri
 Validation **warns rather than refuses**, deliberately. A hard check would make the catalogue uneditable while the placeholders are still in place (the exact state this defect describes), and would block edits whenever Stripe is unreachable or unconfigured. Reporting loudly and saving anyway keeps the operator in control while making a typo impossible to miss.
 The remaining work is data entry against a real Stripe account, which cannot be done from here. `GET /admin/plans` returns `unsellable_active_plans` so the outstanding set is visible on the screen rather than having to be inferred from a storefront that silently drops them.
 
+### D18 — settings never refreshed on a warm instance — **CLOSED (Phase 5c)**
+Found while investigating why a rotated Stripe key did not take effect (§8.5). `Container.effective_settings()` merges the managed overrides over the environment and carries `SETTINGS_REFRESH_SECONDS = 60.0`, documented as a sixty-second refresh. It was called from exactly one place: `Container.startup()`. Nothing on the request path ever called it, so the refresh interval was unreachable and the merged settings were frozen at boot for the life of the instance.
+
+The scope was much wider than the Stripe symptom that exposed it. **Every managed key was affected** — an admin changing any setting saw it written to the database and returned by `GET /admin/settings`, while the running code went on using the boot-time value until the instance happened to recycle. The admin API appeared to work, which is why it survived Phases 5a and 5b.
+
+**Fixed** with an HTTP middleware in `app.py` that awaits `effective_settings()` per request; the existing interval and the `cfg:` cache mean the actual database reads stay at roughly one per key per minute. Verified by a test that changes a setting mid-flight and asserts the next request observes it, and in the break-test by disabling the middleware and confirming that test fails.
+
 ---
 
 ## 3. Decisions
@@ -538,8 +545,8 @@ Prices accept zero (`ge=0`, not `gt=0`): a genuinely free model is real, and rej
 
 **Fix D14:** done in Phase 5a.
 
-### 8.4 Cache TTL control
-Current TTLs are compile-time constants:
+### 8.4 Cache TTL control — **DONE (Phase 5c)**
+TTLs were compile-time constants:
 
 | Key | TTL | Where |
 |---|---|---|
@@ -549,22 +556,39 @@ Current TTLs are compile-time constants:
 | `oauth:google:` | 600 s | `google_oauth.py` |
 | model price | none | `metering.py` |
 
-To make these admin-controlled they must become managed keys read through `RuntimeConfigService`. **Guardrail:** bound every one (e.g. membership 10–300 s). An admin who sets an authorization cache to 24 hours has created a security hole, so the bound is not optional. Also add a "flush cache" action per prefix.
+**DONE (Phase 5c).** All four became fields on `CacheSettings` and bounded managed keys. The fifth, `cfg:`, deliberately did not: resolving its TTL would mean reading the store that TTL governs, the same circularity that keeps `ZEUS_DATABASE_URL` out of the registry. A test asserts it stays out, so a later attempt to "finish the job" is caught where the reason is written down rather than as a puzzling recursion.
 
-### 8.5 Stripe key rotation — **half done (Phase 5b)**
+| Key | Bound | Why that ceiling |
+|---|---|---|
+| `cache.membership_ttl_seconds` | 10–300 s | How long a removed colleague keeps reading a workspace |
+| `cache.entitlements_ttl_seconds` | 30–900 s | How long a suspended tenant keeps working on an instance that missed the invalidation |
+| `cache.oauth_state_ttl_seconds` | 60–1800 s | The replay window for a stolen OAuth state value |
+| `cache.model_price_ttl_seconds` | 60–86400 s | Only bounds drift for a price changed outside the admin API, since an edit deletes the key |
+
+Also extended `MANAGED_KEYS` with the LLM resilience settings §8.3 deferred here, all bounded: `llm.timeout_seconds` (5–300, must stay under the job lease or a slow call is reaped and retried having already been paid for), `llm.max_attempts` (1–10, every attempt is billed), `llm.chunk_chars` (1k–200k, above the context window every call fails), `llm.max_chunks` (1–500, the ceiling on what one upload can cost), and both breaker settings.
+
+**Three decisions worth recording:**
+
+- **Bounds are enforced on read as well as write.** Checking only on write means the one value that matters — the one actually in use — is the one never checked. Bounds get tightened, rows get edited by hand, backups get restored. An out-of-range stored value is discarded on read and the environment default applies, with a warning; it does not raise, because this runs on the request path and a bad row must degrade rather than take the platform down.
+- **A structural test asserts every numeric key declares both bounds**, and a second asserts each range admits the shipped default. The parametrised bound tests can only cover keys somebody remembered to think about; these two mean an unbounded number cannot be added to the registry at all, and a range written round the wrong way is caught immediately.
+- **TTLs are read per use, not captured at construction.** These services are `cached_property` on a container that outlives every request, so a value read once at boot is pinned until the instance recycles — the same shape as D7 and D18. Each takes a `Callable[[], int]` instead.
+
+**Flush cache per prefix:** `POST /admin/cache/flush` against an allowlist, with `GET /admin/cache/prefixes` returning each option *and the consequence of choosing it*, because the person reaching for this is usually doing so under pressure. An allowlist rather than a free-text pattern is the whole design: `Cache.invalidate` takes a glob, and a caller who could send `*` would clear sessions, entitlements and OAuth state in one request and sign out every user of the platform. No operational need is served by the wildcard that a targeted prefix does not serve, so it is unreachable. Audited, and the key count is returned because "it worked" and "there was nothing there" are different answers.
+
+### 8.5 Stripe key rotation — **DONE (Phase 5c)**
 Rotating `stripe_secret_key` while requests are in flight must not break them. `BillingService._provider_instance` was cached for the life of the container, so on a warm instance a rotated key was never picked up — and, worse, a "test connection" built on the cached provider would confidently report success for a key no longer in use.
 
-`reset_provider()` now exists and `POST /admin/billing/test-connection` calls it before probing, so the check tests the key that is *currently* configured. The probe is `Account.retrieve` — the cheapest authenticated read Stripe offers, needs no arguments, creates nothing, and fails only if the credentials are bad. It reports `livemode`, because the most expensive Stripe mistake is not a broken key but a working *test* key in production, which accepts every checkout and charges nobody.
+`reset_provider()` (Phase 5b) is now called by `PUT`/`DELETE /admin/settings/{key}` whenever the key changes starts with `billing.`, so a rotation takes effect on the instance serving the operator immediately, without them having to press test-connection first. Unrelated settings do not touch it — rebuilding a Stripe client on every model-name edit would be waste. The reset is best-effort: a config write that succeeded must not be reported as failed because a cache could not be dropped, and the settings refresh is the backstop.
 
-A failure returns **200 with `ok: false`**, not a 5xx. This is a diagnostic: the request succeeded and the answer is that the credentials do not work. Raising would make "your Stripe key is wrong" indistinguishable in logs and alerting from "the admin API is broken", and those are acted on very differently.
+Other instances pick the change up through the settings refresh, which **Phase 5c had to make work at all** — see D18.
 
-**Outstanding for 5c:** confirming that a key rotated through `RuntimeConfigService` actually takes effect on a warm instance without an admin explicitly pressing test-connection first.
+`POST /admin/billing/test-connection` probes with `Account.retrieve`: the cheapest authenticated read Stripe offers, needs no arguments, creates nothing, and fails only if the credentials are bad. It reports `livemode`, because the most expensive Stripe mistake is not a broken key but a working *test* key in production, which accepts every checkout and charges nobody. A failure returns **200 with `ok: false`**, not a 5xx — the request succeeded and the answer is that the credentials do not work. Raising would make "your Stripe key is wrong" indistinguishable in logs and alerting from "the admin API is broken".
 
 ### Exit criteria
 - [x] Tenant list, detail, suspend/activate, limit override all work end to end
 - [x] Plan and price edits reflect in `/billing/plans` immediately
 - [x] Model price edit takes effect without a restart (D7 closed)
-- [ ] TTL bounds enforced and tested — Phase 5c
+- [x] TTL bounds enforced and tested — Phase 5c
 - [x] Every mutation audited
 - [x] D7, D14 closed; D15 closed as far as code can close it (see D15)
 

@@ -275,6 +275,12 @@ class Container:
             entitlements=self.entitlement_repo,
             tenants=self.tenants,
             cache=self.cache,
+            # ``self._effective``, not ``self.settings``: the former carries
+            # admin overrides and is refreshed on the request path, so an
+            # edited TTL applies without a redeploy. Read through a lambda so
+            # it is resolved per use rather than frozen here -- these services
+            # are cached properties and outlive any request.
+            ttl_seconds=lambda: self._effective.cache.entitlements_ttl_seconds,
         )
 
     @cached_property
@@ -317,6 +323,7 @@ class Container:
             ),
             redirect_uri=cfg.google_redirect_uri or "",
             cache=self.cache,
+            state_ttl_seconds=lambda: self._effective.cache.oauth_state_ttl_seconds,
         )
 
     @cached_property
@@ -391,7 +398,11 @@ class Container:
         """
         from zeus_service_kit.metering import AiUsageRecorder
 
-        return AiUsageRecorder(self.db, self.cache)
+        return AiUsageRecorder(
+            self.db,
+            self.cache,
+            ttl_seconds=lambda: self._effective.cache.model_price_ttl_seconds,
+        )
 
     @cached_property
     def usage(self) -> UsageRepository:

@@ -156,7 +156,15 @@ class Container:
         estimate and no output tokens or cost, and being module-scoped it could
         not answer the owner's cross-tenant question at all.
         """
-        return AiUsageRecorder(self.db, self.cache)
+        return AiUsageRecorder(
+            self.db,
+            self.cache,
+            # Env-driven here, not admin-driven. This service has no config
+            # store of its own, and giving a module service write access to
+            # platform-wide settings to read one number would be a much worse
+            # trade than it reading the deployed default.
+            ttl_seconds=lambda: self.settings.cache.model_price_ttl_seconds,
+        )
 
     @cached_property
     def extraction(self) -> ExtractionService:
@@ -172,7 +180,12 @@ class Container:
 
     @cached_property
     def security(self) -> ServiceSecurity:
-        return ServiceSecurity(auth=self.auth, cache=self.cache, db=self.db)
+        return ServiceSecurity(
+            auth=self.auth,
+            cache=self.cache,
+            db=self.db,
+            member_ttl_seconds=lambda: self.settings.cache.membership_ttl_seconds,
+        )
 
     async def startup(self) -> None:
         await self.db.connect()

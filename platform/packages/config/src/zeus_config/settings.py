@@ -68,6 +68,56 @@ class CacheSettings(_Base):
     provider: str = Field(default="redis", alias="ZEUS_CACHE_PROVIDER")
     redis_url: SecretStr | None = Field(default=None, alias="ZEUS_REDIS_URL")
 
+    # Cache lifetimes. These are deployment defaults; the platform owner can
+    # override each one from the admin dashboard, within bounds enforced by
+    # ``runtime_config.MANAGED_KEYS``.
+    #
+    # The first two are authorisation decisions rather than performance knobs.
+    # How long this value is set to is how long somebody removed from a
+    # workspace, or a tenant just suspended, keeps working. That is why the
+    # admin bound on them is measured in minutes.
+    membership_ttl_seconds: int = Field(
+        default=60, alias="ZEUS_CACHE_MEMBERSHIP_TTL_SECONDS"
+    )
+    entitlements_ttl_seconds: int = Field(
+        default=300, alias="ZEUS_CACHE_ENTITLEMENTS_TTL_SECONDS"
+    )
+    # How long a half-finished Google sign-in stays resumable. A long window
+    # widens the replay window for a stolen state value.
+    oauth_state_ttl_seconds: int = Field(
+        default=600, alias="ZEUS_CACHE_OAUTH_STATE_TTL_SECONDS"
+    )
+    # A price edit deletes the key outright, so this only bounds drift for a
+    # price changed by some other route -- a migration, or a hand-edited row.
+    model_price_ttl_seconds: int = Field(
+        default=900, alias="ZEUS_CACHE_MODEL_PRICE_TTL_SECONDS"
+    )
+
+    # Cache lifetimes. Admin-editable and bounded -- see MANAGED_KEYS in
+    # runtime_config.py, where the reasoning for each ceiling lives. Kept here
+    # rather than as constants next to their consumers so a change does not
+    # need a redeploy.
+    #
+    # Short by design. This one is an authorisation decision: the cost of it
+    # being stale is somebody keeping access to a workspace they were just
+    # removed from.
+    membership_ttl_seconds: int = Field(default=60, alias="ZEUS_CACHE_MEMBERSHIP_TTL_SECONDS")
+    # Longer, because suspension and plan changes invalidate the key directly.
+    # This bounds the worst case on an instance that missed the invalidation,
+    # not the normal one.
+    entitlements_ttl_seconds: int = Field(
+        default=300, alias="ZEUS_CACHE_ENTITLEMENTS_TTL_SECONDS"
+    )
+    # How long a half-finished Google sign-in stays resumable.
+    oauth_state_ttl_seconds: int = Field(
+        default=600, alias="ZEUS_CACHE_OAUTH_STATE_TTL_SECONDS"
+    )
+    # Model prices change rarely and an edit deletes the key outright, so this
+    # only bounds drift for a price changed some other way.
+    model_price_ttl_seconds: int = Field(
+        default=900, alias="ZEUS_CACHE_MODEL_PRICE_TTL_SECONDS"
+    )
+
 
 class DatabaseSettings(_Base):
     provider: str = Field(default="postgres", alias="ZEUS_DATABASE_PROVIDER")
