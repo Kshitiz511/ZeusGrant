@@ -123,6 +123,30 @@ ADMIN_ROUTES = [
     ("post", "/admin/prompts", {"name": "p", "body": "b"}, "/admin/prompts"),
     ("post", "/admin/prompts/activate", {"name": "p", "version": 1}, "/admin/prompts/activate"),
     ("get", "/admin/audit", None, "/admin/audit"),
+    # Tenant control (Phase 5). Suspending a customer is the single most
+    # destructive thing this API can do, so it is covered by the same
+    # exhaustive guard sweep as everything else.
+    ("get", "/admin/tenants", None, "/admin/tenants"),
+    ("get", f"/admin/tenants/{TENANT}", None, "/admin/tenants/{tenant_id}"),
+    (
+        "post",
+        f"/admin/tenants/{TENANT}/status",
+        {"status": "suspended", "reason": "nonpayment"},
+        "/admin/tenants/{tenant_id}/status",
+    ),
+    ("get", f"/admin/tenants/{TENANT}/limits", None, "/admin/tenants/{tenant_id}/limits"),
+    (
+        "put",
+        f"/admin/tenants/{TENANT}/limits/scans_per_month",
+        {"limit_value": 500, "reason": "sales concession"},
+        "/admin/tenants/{tenant_id}/limits/{limit_key}",
+    ),
+    (
+        "delete",
+        f"/admin/tenants/{TENANT}/limits/scans_per_month",
+        None,
+        "/admin/tenants/{tenant_id}/limits/{limit_key}",
+    ),
 ]
 
 
@@ -151,13 +175,19 @@ def test_the_admin_router_has_no_unguarded_routes():
     The parametrised tests above can only cover routes somebody remembered to
     list. This asserts the list is complete, so a new endpoint cannot be added
     and silently escape both.
+
+    Every module contributing admin routes must be named here. Splitting the
+    admin surface across routers is what makes that necessary: a new router
+    nobody added to this tuple would be invisible to the sweep, so the tuple is
+    the one thing a reviewer has to check when a new admin router appears.
     """
-    from zeus_platform_core.routers import admin
+    from zeus_platform_core.routers import admin, admin_tenants
 
     listed = {(m.lower(), template) for m, _, _, template in ADMIN_ROUTES}
     actual = {
         (method.lower(), route.path)
-        for route in admin.router.routes
+        for module in (admin, admin_tenants)
+        for route in module.router.routes
         for method in getattr(route, "methods", set())
         if method != "HEAD"
     }
@@ -236,8 +266,8 @@ def test_setting_change_is_audited_without_recording_the_value(operator):
 
     assert resp.status_code == 200
     assert len(written) == 1
+    assert written[0][2] == "setting.update"
     recorded = json.dumps([str(a) for a in written[0]])
-    assert "setting.update" in recorded
     assert "llm.model" in recorded
     assert "sk-looks-like-a-secret" not in recorded
     assert "changed" in recorded
@@ -250,7 +280,7 @@ def test_prompt_activation_is_audited(operator):
 
     assert resp.status_code == 200
     assert len(written) == 1
-    assert "prompt.activate" in written[0]
+    assert written[0][2] == "prompt.activate"
 
 
 def test_the_audit_row_names_the_operator_even_when_the_token_does_not(operator):
@@ -287,4 +317,215 @@ def test_reading_the_audit_log_is_not_itself_audited(operator):
     resp = client.get("/admin/audit", headers=AUTH)
 
     assert resp.status_code == 200
+    assert written == []
+
+
+# --- 4. tenant control is audited -------------------------------------------
+#
+# These go through the real routes rather than calling the repository, because
+# the thing being tested is that the route writes the audit row -- a repository
+# test would pass whether or not anyone ever called it. The first version of
+# this file had no such test, and a deliberate break (removing the audit call
+# from the override route) went unnoticed by the entire suite.
+
+
+def _tenant_db() -> FakeDatabase:
+    """A fake database rich enough for the tenant-control routes.
+
+    Needle order matters: FakeDatabase returns the first registered substring
+    match, and ``set_status``'s UPDATE also contains ``FROM platform.tenants``.
+    The specific handlers therefore have to be registered before the general
+    one, or the update would be answered by the lookup stub.
+    """
+    db = _db(is_admin=True)
+
+    db.on_fetch_one(
+        "UPDATE platform.tenants",
+        lambda args: {"previous_status": "active", "status": args[1]},
+    )
+    db.on_fetch_one(
+        "INSERT INTO platform.tenant_limit_overrides",
+        lambda args: {
+            "limit_key": args[1],
+            "limit_value": args[2],
+            "reason": args[3],
+            "created_at": None,
+            "updated_at": None,
+        },
+    )
+    db.on_fetch_one("SELECT limit_value, reason", lambda args: None)
+    db.on_fetch_one(
+        "DELETE FROM platform.tenant_limit_overrides",
+        lambda args: {"limit_key": args[1], "limit_value": 10, "reason": "old"},
+    )
+    db.on_fetch_one(
+        "FROM platform.tenants WHERE id",
+        lambda args: {
+            "id": TENANT,
+            "name": "Acme",
+            "slug": "acme",
+            "owner_user_id": USER,
+            "status": "active",
+            "stripe_customer_id": None,
+        },
+    )
+    db.on_fetch(
+        "FROM platform.plan_limits",
+        lambda args: [
+            {"plan_id": "gi_growth", "limit_key": "matches_per_month", "limit_value": 100}
+        ],
+    )
+    return db
+
+
+@pytest.fixture
+def tenant_operator() -> Iterator[tuple[TestClient, list[tuple]]]:
+    auth = StubAuth([PLATFORM_ADMIN_ROLE])
+    container = Container(db=_tenant_db(), cache=MemoryCache(), auth=auth)
+
+    written: list[tuple] = []
+
+    async def capture(query: str, *args):
+        if "admin_audit" in query:
+            written.append(args)
+        return "INSERT 0 1"
+
+    container.db.execute = capture  # type: ignore[method-assign]
+    yield TestClient(create_app(container)), written
+
+
+def test_suspending_a_tenant_is_audited_with_both_statuses(tenant_operator):
+    """Before and after are both recorded, from the same statement that wrote it.
+
+    A trail saying only "suspended" cannot answer whether the tenant was
+    already suspended, which is the difference between an action and a no-op.
+    """
+    client, written = tenant_operator
+
+    resp = client.post(
+        f"/admin/tenants/{TENANT}/status",
+        json={"status": "suspended", "reason": "non-payment"},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["previous_status"] == "active"
+    assert resp.json()["status"] == "suspended"
+
+    assert len(written) == 1
+    # Positional, against the INSERT's argument order:
+    #   (actor_user_id, actor_email, action, target_type, target_id, before, after, ...)
+    # Asserting equality rather than substring containment: an earlier version
+    # used `in`, and a break that renamed the action to "tenant.status.set.X"
+    # still passed, because the old name is a prefix of the new one.
+    assert written[0][2] == "tenant.status.set"
+    assert written[0][3] == "tenant"
+    assert written[0][4] == TENANT
+    assert json.loads(written[0][5]) == {"status": "active"}
+    assert json.loads(written[0][6]) == {"status": "suspended", "reason": "non-payment"}
+
+
+def test_suspension_leaves_the_tenant_entitled_to_nothing(tenant_operator):
+    """The route recomputes rather than waiting for the 300s cache TTL to lapse.
+
+    Without the explicit invalidate-and-refresh, a suspended tenant keeps
+    working for up to five minutes and the operator concludes the button is
+    broken.
+    """
+    client, _ = tenant_operator
+
+    resp = client.post(
+        f"/admin/tenants/{TENANT}/status",
+        json={"status": "suspended", "reason": "non-payment"},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["active_modules"] == []
+
+
+def test_setting_a_limit_override_is_audited(tenant_operator):
+    client, written = tenant_operator
+
+    resp = client.put(
+        f"/admin/tenants/{TENANT}/limits/matches_per_month",
+        json={"limit_value": 500, "reason": "sales concession"},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert len(written) == 1
+    assert written[0][2] == "tenant.limit.set"
+    assert written[0][4] == TENANT
+    # No previous override, so `before` is null rather than a row of nulls --
+    # "there was nothing here" and "it was explicitly unlimited" are different
+    # facts and the trail has to keep them apart.
+    assert written[0][5] is None
+    assert json.loads(written[0][6]) == {
+        "limit_key": "matches_per_month",
+        "limit_value": 500,
+        "reason": "sales concession",
+    }
+
+
+def test_clearing_a_limit_override_is_audited(tenant_operator):
+    client, written = tenant_operator
+
+    resp = client.delete(f"/admin/tenants/{TENANT}/limits/matches_per_month", headers=AUTH)
+
+    assert resp.status_code == 200, resp.text
+    assert len(written) == 1
+    assert written[0][2] == "tenant.limit.cleared"
+    assert json.loads(written[0][5]) == {"limit_key": "matches_per_month", "limit_value": 10}
+    assert written[0][6] is None
+
+
+def test_an_unknown_limit_key_is_refused_rather_than_silently_stored(tenant_operator):
+    """A typo would write a row that resolves against nothing.
+
+    That is the worst failure mode available here: silent, and indistinguishable
+    from success to the operator who made it.
+    """
+    client, written = tenant_operator
+
+    resp = client.put(
+        f"/admin/tenants/{TENANT}/limits/maches_per_month",
+        json={"limit_value": 500, "reason": "typo"},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 400
+    assert "unknown limit key" in resp.json()["detail"]
+    assert written == []
+
+
+def test_an_override_without_a_reason_is_refused(tenant_operator):
+    """Required at write time because that is the only moment anyone knows it."""
+    client, written = tenant_operator
+
+    resp = client.put(
+        f"/admin/tenants/{TENANT}/limits/matches_per_month",
+        json={"limit_value": 500},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 422
+    assert written == []
+
+
+def test_a_tenant_cannot_be_deleted_through_the_status_route(tenant_operator):
+    """``deleted`` is valid in the database but is not offered here.
+
+    Deletion has to deal with retention and Stripe cancellation; a status flip
+    that merely looks like a delete is worse than having no delete at all.
+    """
+    client, written = tenant_operator
+
+    resp = client.post(
+        f"/admin/tenants/{TENANT}/status",
+        json={"status": "deleted", "reason": "cleanup"},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 422
     assert written == []

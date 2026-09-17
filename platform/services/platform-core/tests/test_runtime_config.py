@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from typing import get_args
+
 import pytest
+from pydantic import BaseModel
+from zeus_config.settings import Settings
 from zeus_platform_core.services.runtime_config import (
+    BOOTSTRAP_ENV_VARS,
     CACHE_PREFIX,
     MANAGED_KEYS,
     RuntimeConfigService,
@@ -118,10 +123,41 @@ async def test_empty_value_is_rejected():
 
 def test_bootstrap_settings_are_not_managed():
     # Storing these in the store they unlock would be circular.
+    #
+    # Asserting over the whole BOOTSTRAP_ENV_VARS set rather than a hand-written
+    # list means adding a bootstrap variable is automatically covered. The old
+    # version listed names inline, which is how ZEUS_JWT_SECRET -- a variable
+    # that does not exist -- sat in the set passing a test for years (D14).
     env_vars = {k.env_var for k in MANAGED_KEYS}
-    assert "ZEUS_DATABASE_URL" not in env_vars
-    assert "ZEUS_SECRETS_ENCRYPTION_KEY" not in env_vars
-    assert "ZEUS_JWT_SECRET" not in env_vars
+    assert env_vars.isdisjoint(BOOTSTRAP_ENV_VARS)
+
+
+def test_bootstrap_env_vars_are_real_settings():
+    """Every bootstrap name must correspond to an actual settings alias.
+
+    A guard listing a variable nobody reads protects nothing while looking as
+    though it does. This is the check that would have caught D14, where the set
+    named ``ZEUS_JWT_SECRET`` and the real field was ``ZEUS_SUPABASE_JWT_SECRET``.
+
+    The walk is over the model *classes*, not an instance, so it needs no
+    environment and cannot be made to pass by whatever happens to be exported.
+    """
+    aliases: set[str] = set()
+    seen: set[type] = set()
+
+    def walk(model: type[BaseModel]) -> None:
+        if model in seen:
+            return
+        seen.add(model)
+        for field in model.model_fields.values():
+            if field.alias:
+                aliases.add(field.alias)
+            for arg in (field.annotation, *get_args(field.annotation)):
+                if isinstance(arg, type) and issubclass(arg, BaseModel):
+                    walk(arg)
+
+    walk(Settings)
+    assert aliases >= BOOTSTRAP_ENV_VARS, f"not real settings: {BOOTSTRAP_ENV_VARS - aliases}"
 
 
 def test_secrets_are_flagged_so_they_are_encrypted_and_never_echoed():

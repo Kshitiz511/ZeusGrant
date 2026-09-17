@@ -44,6 +44,7 @@ def _service(db: FakeDatabase) -> AuthService:
         subscriptions=SubscriptionRepository(db),
         plans=PlanRepository(db),
         entitlements=EntitlementRepository(db),
+        tenants=tenants,
         cache=cache,
     )
     return AuthService(

@@ -105,11 +105,17 @@ _BY_KEY = {k.key: k for k in MANAGED_KEYS}
 
 #: Settings that unlock the config store itself and therefore cannot be stored
 #: inside it. Listed explicitly so the refusal is a clear error, not a puzzle.
+#:
+#: These are the real ``alias`` values from ``zeus_config.settings``. That is
+#: load-bearing: this set is compared against ``ManagedKey.env_var``, so a name
+#: that does not exist anywhere protects nothing. It previously read
+#: ``ZEUS_JWT_SECRET``, which is not a setting the application has ever had --
+#: the guard looked present and did nothing (defect D14).
 BOOTSTRAP_ENV_VARS = frozenset(
     {
         "ZEUS_DATABASE_URL",
         "ZEUS_SECRETS_ENCRYPTION_KEY",
-        "ZEUS_JWT_SECRET",
+        "ZEUS_SUPABASE_JWT_SECRET",
         "ZEUS_REDIS_URL",
     }
 )

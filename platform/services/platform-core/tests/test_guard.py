@@ -32,6 +32,23 @@ class StubAuth:
 
 def _fake_db() -> FakeDatabase:
     db = FakeDatabase()
+    # The tenant itself must exist and be active. Entitlement resolution reads
+    # the status, and a tenant it cannot find is treated as deleted -- so
+    # omitting this row does not produce a neutral fixture, it produces a
+    # suspended one.
+    db.on_fetch_one(
+        "FROM platform.tenants",
+        lambda args: {
+            "id": TENANT,
+            "name": "Probe Co",
+            "slug": "probe-co",
+            "owner_user_id": "user-1",
+            "status": "active",
+            "stripe_customer_id": None,
+        },
+    )
+    # No per-tenant limit overrides: this tenant gets exactly what its plan says.
+    db.on_fetch("FROM platform.tenant_limit_overrides", lambda args: [])
     # Tenant t has one ACTIVE grant_intelligence subscription.
     db.on_fetch(
         "FROM platform.subscriptions",

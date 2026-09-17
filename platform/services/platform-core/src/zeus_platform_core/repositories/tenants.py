@@ -6,7 +6,7 @@ import re
 
 from zeus_adapters.interfaces import Database
 
-from zeus_platform_core.domain.models import Role, Tenant
+from zeus_platform_core.domain.models import ACCESS_GRANTING_STATUSES, Role, Tenant
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -321,6 +321,214 @@ class TenantRepository:
             tenant_id,
         )
         return Tenant(**row) if row else None
+
+    # -- platform-admin views -------------------------------------------------
+    #
+    # These are the only queries in this repository that deliberately cross
+    # tenant boundaries. They are reachable exclusively from the platform-admin
+    # router, which binds no tenant and so falls into the NULL branch of every
+    # RLS policy. Nothing here may be called from a tenant-scoped request path.
+
+    async def list_tenants(
+        self,
+        *,
+        status: str | None = None,
+        search: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Every tenant on the platform, newest first, with a usage summary.
+
+        ``search`` matches name, slug or owner email so an operator can find a
+        tenant from whatever the customer quoted at them.
+
+        The two counts are correlated subqueries rather than joins on purpose:
+        joining memberships and subscriptions in one statement multiplies the
+        rows together and would silently inflate both numbers.
+        """
+        return await self._db.fetch(
+            """
+            SELECT t.id::text                AS id,
+                   t.name,
+                   t.slug,
+                   t.status,
+                   t.created_at,
+                   t.stripe_customer_id,
+                   u.email                   AS owner_email,
+                   (SELECT count(*) FROM platform.memberships m
+                     WHERE m.tenant_id = t.id)                      AS member_count,
+                   (SELECT count(*) FROM platform.subscriptions s
+                     WHERE s.tenant_id = t.id
+                       AND s.status = ANY($5::text[]))              AS active_module_count,
+                   (SELECT count(*) FROM platform.tenant_limit_overrides o
+                     WHERE o.tenant_id = t.id)                      AS override_count
+            FROM platform.tenants t
+            LEFT JOIN platform.users u ON u.id = t.owner_user_id
+            WHERE ($1::text IS NULL OR t.status = $1)
+              AND (
+                    $2::text IS NULL
+                 OR t.name  ILIKE '%' || $2 || '%'
+                 OR t.slug  ILIKE '%' || $2 || '%'
+                 OR u.email ILIKE '%' || $2 || '%'
+              )
+            ORDER BY t.created_at DESC
+            LIMIT $3 OFFSET $4
+            """,
+            status,
+            search,
+            max(1, min(limit, 200)),
+            max(0, offset),
+            sorted(str(s) for s in ACCESS_GRANTING_STATUSES),
+        )
+
+    async def count_tenants(self, *, status: str | None = None, search: str | None = None) -> int:
+        """Total matching ``list_tenants``, so the UI can page without guessing."""
+        row = await self._db.fetch_one(
+            """
+            SELECT count(*) AS n
+            FROM platform.tenants t
+            LEFT JOIN platform.users u ON u.id = t.owner_user_id
+            WHERE ($1::text IS NULL OR t.status = $1)
+              AND (
+                    $2::text IS NULL
+                 OR t.name  ILIKE '%' || $2 || '%'
+                 OR t.slug  ILIKE '%' || $2 || '%'
+                 OR u.email ILIKE '%' || $2 || '%'
+              )
+            """,
+            status,
+            search,
+        )
+        return int(row["n"]) if row else 0
+
+    async def set_status(self, tenant_id: str, status: str) -> dict | None:
+        """Change a tenant's status, returning both the old and new values.
+
+        The previous value is returned from the same statement that writes the
+        new one so the audit record cannot disagree with what actually happened.
+        Reading it in a separate query would leave a window in which a
+        concurrent change makes the audit trail a lie.
+
+        Returns None if no such tenant exists, which the caller must translate
+        into a 404 rather than reporting a successful no-op.
+        """
+        row = await self._db.fetch_one(
+            """
+            UPDATE platform.tenants t
+               SET status = $2, updated_at = now()
+              FROM (SELECT id, status FROM platform.tenants WHERE id = $1 FOR UPDATE) prev
+             WHERE t.id = prev.id
+            RETURNING prev.status AS previous_status, t.status AS status
+            """,
+            tenant_id,
+            status,
+        )
+        return dict(row) if row else None
+
+    # -- per-tenant limit overrides -------------------------------------------
+
+    async def list_limit_overrides(self, tenant_id: str) -> list[dict]:
+        return await self._db.fetch(
+            """
+            SELECT o.limit_key,
+                   o.limit_value,
+                   o.reason,
+                   o.set_by::text AS set_by,
+                   u.email        AS set_by_email,
+                   o.created_at,
+                   o.updated_at
+            FROM platform.tenant_limit_overrides o
+            LEFT JOIN platform.users u ON u.id = o.set_by
+            WHERE o.tenant_id = $1
+            ORDER BY o.limit_key
+            """,
+            tenant_id,
+        )
+
+    async def limit_overrides_map(self, tenant_id: str) -> dict[str, int | None]:
+        """Overrides shaped for the entitlement resolver.
+
+        A key present with a NULL value means explicitly unlimited, which is why
+        this returns ``dict[str, int | None]`` rather than dropping the NULLs.
+        Dropping them would turn "uncapped" back into "use the plan's cap".
+        """
+        rows = await self._db.fetch(
+            """
+            SELECT limit_key, limit_value
+            FROM platform.tenant_limit_overrides
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+        return {row["limit_key"]: row["limit_value"] for row in rows}
+
+    async def set_limit_override(
+        self,
+        *,
+        tenant_id: str,
+        limit_key: str,
+        limit_value: int | None,
+        reason: str,
+        set_by: str | None,
+    ) -> dict | None:
+        """Upsert one override, returning the previous value if there was one.
+
+        ``previous_value`` and ``existed`` are returned separately because a
+        previous value of NULL is meaningful (explicitly unlimited) and cannot
+        be distinguished from "there was no override" by the value alone.
+        """
+        before = await self._db.fetch_one(
+            """
+            SELECT limit_value, reason
+            FROM platform.tenant_limit_overrides
+            WHERE tenant_id = $1 AND limit_key = $2
+            """,
+            tenant_id,
+            limit_key,
+        )
+        row = await self._db.fetch_one(
+            """
+            INSERT INTO platform.tenant_limit_overrides
+                   (tenant_id, limit_key, limit_value, reason, set_by)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (tenant_id, limit_key) DO UPDATE
+               SET limit_value = EXCLUDED.limit_value,
+                   reason      = EXCLUDED.reason,
+                   set_by      = EXCLUDED.set_by,
+                   updated_at  = now()
+            RETURNING limit_key, limit_value, reason, created_at, updated_at
+            """,
+            tenant_id,
+            limit_key,
+            limit_value,
+            reason,
+            set_by,
+        )
+        if row is None:
+            return None
+        return {
+            **dict(row),
+            "existed": before is not None,
+            "previous_value": before["limit_value"] if before else None,
+            "previous_reason": before["reason"] if before else None,
+        }
+
+    async def clear_limit_override(self, *, tenant_id: str, limit_key: str) -> dict | None:
+        """Remove an override so the limit falls back to the plan.
+
+        Returns the deleted row, or None if there was nothing to delete — the
+        caller should 404 rather than claim to have removed something.
+        """
+        row = await self._db.fetch_one(
+            """
+            DELETE FROM platform.tenant_limit_overrides
+            WHERE tenant_id = $1 AND limit_key = $2
+            RETURNING limit_key, limit_value, reason
+            """,
+            tenant_id,
+            limit_key,
+        )
+        return dict(row) if row else None
 
     async def get_membership_role(self, *, tenant_id: str, user_id: str) -> str | None:
         """The caller's role in a tenant, or None if they are not a member."""

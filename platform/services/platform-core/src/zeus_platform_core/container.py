@@ -266,6 +266,7 @@ class Container:
             subscriptions=self.subscriptions,
             plans=self.plans,
             entitlements=self.entitlement_repo,
+            tenants=self.tenants,
             cache=self.cache,
         )
 

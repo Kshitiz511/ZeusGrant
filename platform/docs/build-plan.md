@@ -109,9 +109,19 @@ There is no reaper. If nothing claims, expired leases are never swept, and a stu
 Zero tests assert that a non-admin gets 403 from admin routes, or that `platform_admin` cannot be self-granted via token exchange.
 **Fixed in Phase 4.** `tests/test_platform_admin.py` (25 tests) covers both, parametrised over every admin route, plus a structural test asserting the parametrised list matches the router's registered routes so a new endpoint cannot escape it. Verified by breaking both guarantees and watching the tests fail.
 
-### D14 — `ZEUS_JWT_SECRET` is in `BOOTSTRAP_KEYS` but is not a settings field
-The real field is `ZEUS_SUPABASE_JWT_SECRET`. The frozenset entry protects nothing.
-**Fix in Phase 5.**
+### D14 — `ZEUS_JWT_SECRET` is in `BOOTSTRAP_ENV_VARS` but is not a settings field — **CLOSED (Phase 5a)**
+The real field is `ZEUS_SUPABASE_JWT_SECRET`. The frozenset entry protected nothing.
+**Fixed in Phase 5a.** Name corrected in `services/runtime_config.py`. The test that covered this was itself part of the problem: it asserted three hand-written names were absent from `MANAGED_KEYS`, which a name that exists nowhere trivially satisfies. Replaced with two tests — one asserting `MANAGED_KEYS` and `BOOTSTRAP_ENV_VARS` are disjoint as whole sets, and one walking the `Settings` model classes to assert every bootstrap name is a real alias. The second is the one that would have caught D14. Verified by reinstating the old name and watching it fail.
+
+### D16 — `platform.tenants` and `platform.users` have no RLS — **OPEN (found Phase 5a)**
+Every table carrying a `tenant_id` column is row-isolated in the database. `tenants` and `users` are not: they are keyed by `id`, so the standard policy predicate does not apply, and token exchange and signup must read them before any tenant is bound. Isolation for those two is therefore an application-layer property only — a query bug in a tenant-scoped path could enumerate all tenants, and the database would not stop it.
+Not a live exploit: no tenant-scoped route currently reads them unfiltered. Recorded rather than fixed because adding RLS here touches auth and signup, which is not a change to make in passing.
+`scripts/probe_phase5_tenants.py` asserts the gap as it stands, so if someone adds RLS the probe fails and forces this entry to be updated instead of silently going stale.
+**Fix in Phase 7 (guardrails).**
+
+### D17 — e2e scripts could write to production — **CLOSED (Phase 5a)**
+The e2e scripts create accounts, grant platform-admin rights and suspend tenants. They took their target from `ZEUS_DATABASE_URL` and the API from `API`, with no check on either. During Phase 5a a shell had `ZEUS_DATABASE_URL` exported to Supabase; a locally-launched uvicorn inherited it and a probe signup created a real user and tenant **in production** before failing on the not-yet-deployed migration. Rows were removed.
+**Fixed in Phase 5a.** Both `e2e_tenant_suspension.py` and `e2e_platform_admin.py` now refuse to start unless the DSN host and the API host are local. Verified by running with the production DSN still exported and watching the refusal.
 
 ### D15 — Stripe price ids are placeholders
 All 15 seeded plans carry ids like `gi_starter_monthly`. These are not live Stripe ids. Checkout cannot work for a real purchase until they are replaced.
@@ -449,17 +459,40 @@ most interesting question about itself.
 
 **Depends on:** Phase 4.
 
-### 8.1 Tenant management
-```
-GET   /admin/tenants                 list: name, owner, members, plans, usage, cost, created
-GET   /admin/tenants/{id}            detail: subscriptions, members, usage series, jobs, limits
-POST  /admin/tenants/{id}/suspend    status → suspended
-POST  /admin/tenants/{id}/activate
-PATCH /admin/tenants/{id}/limits     per-tenant limit override
-```
-**Suspension semantics must be decided and documented:** does a suspended tenant lose API access immediately, or read-only? Immediate lockout needs the entitlement cache invalidated on suspend (5 min TTL otherwise). Recommendation: suspend sets tenant status, entitlement computation treats non-active tenants as granting nothing, and suspend explicitly invalidates the cache.
+### 8.1 Tenant management — **DONE (Phase 5a)**
 
-**Per-tenant overrides** need a new table `platform.tenant_limit_overrides` (`tenant_id`, `limit_key`, `limit_value`, `reason`, `set_by`, `created_at`). Resolution: override → plan limit → unlimited. This is how you give one customer a higher ceiling without inventing a plan.
+Shipped routes (all under `AdminDep`, all mutations audited):
+```
+GET    /admin/tenants                          list + total, filter by status, search name/slug/owner email
+GET    /admin/tenants/{id}                     members, subscriptions, overrides, freshly computed entitlements
+POST   /admin/tenants/{id}/status              {status: active|suspended, reason}
+GET    /admin/tenants/{id}/limits              current overrides + the keys that may be overridden
+PUT    /admin/tenants/{id}/limits/{limit_key}  {limit_value, reason}
+DELETE /admin/tenants/{id}/limits/{limit_key}
+```
+One status route rather than separate `/suspend` and `/activate`: the two differ only in the value written, and a single route means the audit row records the transition (`before`/`after`) rather than just the fact a button was pressed.
+
+`deleted` is a valid value of the column but is **not** accepted by the route. Deletion has to deal with retention and Stripe cancellation; a status flip that merely looks like a delete is worse than having no delete.
+
+**Suspension semantics — DECIDED (answers Q5).** Suspension is immediate for new work and does not touch work already running.
+- `compute_claims` returns an empty snapshot for any non-active tenant. The check lives in the pure function rather than at each call site, so it holds everywhere entitlements are read — including from guards written later by someone who never read that file.
+- The route invalidates *and* recomputes the entitlement cache. Without that the 300s TTL means a suspended tenant keeps working for up to five minutes and the operator concludes the button is broken.
+- `get_membership_role` already refused to mint a tenant token for a non-active tenant, so token exchange was a second, pre-existing enforcement point.
+- **Queued jobs run to completion.** The worker authenticates by shared secret and claims work from its own ledger; it never consults entitlements. A customer who submitted work while in good standing gets the result, and tearing down half-finished work leaves documents in a state nobody can explain. This is a decision, not an oversight — `test_tenant_suspension.py` has a characterisation test that fails if the worker ever starts reading entitlements, so reversing the policy has to be deliberate.
+- Suspension never touches subscriptions. It is an access decision, not a billing one, so reactivating restores exactly what the tenant had.
+
+**Per-tenant overrides.** Migration `0017_tenant_limit_overrides.sql`: PK `(tenant_id, limit_key)`, `reason NOT NULL`, `set_by` nullable `ON DELETE SET NULL`, RLS enabled and forced. Resolution is override → plan limit → unlimited.
+- `limit_value` is nullable and NULL means *explicitly unlimited*. That is deliberately **not** the same as having no row, which falls through to the plan. Collapsing the two would make it impossible to lift a cap without editing the plan, which is the entire reason the table exists.
+- Overrides are merged into the plan's limits per key, not substituted wholesale. Substituting would silently drop every limit the operator did not happen to mention, turning a raised ceiling into an accidental removal of all the others.
+- `reason` is required because the only moment anyone reliably knows it is at write time. Without it nobody can later tell a sales concession from a forgotten debugging change, and the override becomes permanent by default.
+- Unknown limit keys are rejected against the union of keys across all plans. A typo would otherwise write a row that resolves against nothing — silent, and indistinguishable from success to the operator who made it.
+
+**Verification.** 362 unit tests green; `scripts/probe_phase5_tenants.py` 18/18 against real Postgres as the non-superuser `zeus_app` (schema, nullability, partial index, RLS forced, upsert idempotence, cross-tenant isolation via `tenant_scope`, cascade on delete); `scripts/e2e_tenant_suspension.py` 28/28 through HTTP against the running API; `scripts/break_test_phase5.py` deliberately defeats five guarantees in turn and confirms a test catches each.
+
+The break-test harness earned its keep immediately: it found that the override audit was untested, and then that the replacement assertion used substring containment (`"tenant.limit.set" in ...`), which a renamed action still satisfied. Both are now positional equality checks against the INSERT's argument order.
+
+### 8.1b Tenant management — remaining
+Usage and cost series are not yet on the detail response; the list shows member, module and override counts only. Deferred to Phase 8 when the screen that consumes them is built, rather than guessing at the shape now.
 
 ### 8.2 Pricing and plans (fixes D15)
 ```
@@ -685,7 +718,7 @@ Required:
 | ~~Q2~~ | ~~Legacy scope.~~ **Answered 2026-09-16:** all modules in scope. Phase 9 split into 9a–9f, ordered cheapest-and-most-visible first, with the AI-heavy modules deferred until metering (Phase 2) and guardrails (Phase 7) exist. | ~~Phase 9~~ |
 | ~~Q3~~ | ~~Grant limit values.~~ **Answered 2026-09-16 by assumption:** seeded at the values the hardcoded fallbacks already used, so no existing tenant's behaviour changed. Those fallbacks are **3 scans and 25 matches** — the 4 and 50 previously recorded here were wrong. Seeded in migration 0014 as scans 3/10/30/100 and matches 25/100/unlimited/unlimited. Revisit when pricing is set commercially. | ~~Phase 1~~ |
 | Q4 | Page definition — how is a page counted for DOCX and plain text? Proposal: `ceil(chars / 3000)`. | Phase 7 |
-| Q5 | Suspension semantics — hard lockout or read-only? | Phase 5 |
+| ~~Q5~~ | ~~Suspension semantics — hard lockout or read-only?~~ **Answered 2026-09-16:** hard lockout for *new* work, and queued jobs run to completion. Implemented in Phase 5a — see §8.1. The drain half needed no new machinery: the worker authenticates by shared secret and never consults entitlements, so it was already the behaviour. What it needed was a test that fails if anyone changes it by accident. | ~~Phase 5~~ |
 | Q6 | Retry semantics — does an admin retry reset `attempts` to 0 or continue the count? | Phase 6 |
 | Q7 | Enterprise plans have no limit rows, so unlimited. Intended? | Phase 7 |
 | ~~Q8~~ | ~~`ai_usage` cost backfill.~~ **Answered 2026-09-16 by measurement:** production has zero rows in both usage tables, so there is nothing to reconstruct. Moot. | ~~Phase 2~~ |
@@ -698,7 +731,8 @@ Required:
 
 **Traps that have already cost time. Do not rediscover these.**
 
-- **Heredocs mangle this terminal.** Use `create_file` then `git commit -F <file>`. Avoid embedded quotes in long `python -c` strings.
+- **Heredocs mangle this terminal.** Use `create_file` then `git commit -F <file>`. Avoid embedded quotes in long `python -c` strings. (Happened again in Phase 5a. For multi-step shell logic, write a script file and run it.)
+- **Check `echo $ZEUS_DATABASE_URL` before starting a local server or running any e2e script.** A shell with the production DSN exported gets inherited by a locally-launched uvicorn, and `localhost:8000` then writes to Supabase. This created a real user and tenant in production during Phase 5a (removed). The e2e scripts now refuse to start unless both the DSN host and the API host are local — but only the scripts are guarded; a manual `curl` against a mis-pointed local server is not.
 - Run Python as `unset PYTHONPATH && .venv/bin/python ...` from `platform/`.
 - The four-tree `PYTHONPATH` is required for workspace imports: `packages/config/src:packages/adapters/src:packages/service-kit/src:services/platform-core/src:services/contract-compliance/src`.
 - **Test RLS as `zeus_app`, never `zeus`.** `zeus` is a superuser and bypasses RLS; production uses `zeus_app`, which is `NOBYPASSRLS`. A strict policy that passes as `zeus` broke signup as `zeus_app`.

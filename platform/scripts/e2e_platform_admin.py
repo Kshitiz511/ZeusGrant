@@ -34,6 +34,21 @@ def check(label, cond, detail=""):
 
 
 def main() -> int:
+    # Refuse before writing anything if this could reach a real database. This
+    # script creates accounts and grants platform-admin rights; run against
+    # production it would leave a junk operator behind. It has happened once
+    # already, via a shell with ZEUS_DATABASE_URL exported to Supabase that a
+    # locally-launched API inherited. Detecting it afterwards is too late.
+    dsn = os.environ.get("ZEUS_DATABASE_URL", "")
+    host = dsn.split("@")[-1].split("/")[0].split(":")[0] if "@" in dsn else ""
+    local = ("localhost", "127.0.0.1", "postgres")
+    if dsn and host not in local:
+        sys.exit(
+            f"refusing to run: ZEUS_DATABASE_URL points at {host!r}, not a local database."
+        )
+    if not any(h in API for h in local):
+        sys.exit(f"refusing to run: API is {API!r}, which is not local.")
+
     c = httpx.Client(base_url=API, timeout=30)
 
     r = c.post(
