@@ -33,6 +33,7 @@ from fastapi.testclient import TestClient
 from zeus_adapters.cache.memory_cache import MemoryCache
 from zeus_adapters.db.fake_db import FakeDatabase
 from zeus_adapters.models import Session
+from zeus_config.secrets import SecretBox
 from zeus_config.settings import Settings
 from zeus_platform_core.app import create_app
 from zeus_platform_core.container import Container
@@ -339,6 +340,11 @@ def stack() -> Iterator[tuple[TestClient, list[tuple], MemoryCache, StubBilling,
     db = _db()
     container = Container(db=db, cache=cache, auth=StubAuth([PLATFORM_ADMIN_ROLE]))
     container.__dict__["billing"] = billing
+    # Both billing keys are secrets, so writing one needs a box. Supplying a
+    # throwaway key here rather than reading ZEUS_SECRETS_ENCRYPTION_KEY keeps
+    # the test from passing on a developer machine that happens to export one
+    # and failing on a clean CI runner that does not.
+    container.__dict__["secret_box"] = SecretBox(SecretBox.generate_key())
 
     written: list[tuple] = []
     real_execute = db.execute

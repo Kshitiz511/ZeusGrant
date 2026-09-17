@@ -501,6 +501,8 @@ One status route rather than separate `/suspend` and `/activate`: the two differ
 
 The break-test harness earned its keep immediately: it found that the override audit was untested, and then that the replacement assertion used substring containment (`"tenant.limit.set" in ...`), which a renamed action still satisfied. Both are now positional equality checks against the INSERT's argument order.
 
+**A test must not read the ambient environment.** Phase 5c shipped with a fixture that wrote a Stripe secret through the real code path. It passed locally because the shell had `ZEUS_SECRETS_ENCRYPTION_KEY` exported and failed on the first clean CI runner, where nothing does. Fixtures now supply what they need — that one builds its own throwaway `SecretBox` — and the suite is run with `env -u` for any variable the developer machine happens to carry before it is called green.
+
 ### 8.1b Tenant management — remaining
 Usage and cost series are not yet on the detail response; the list shows member, module and override counts only. Deferred to Phase 8 when the screen that consumes them is built, rather than guessing at the shape now.
 
