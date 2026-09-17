@@ -94,17 +94,40 @@ Verified by removing the `cache.delete` in `break_test_phase5.py` and watching t
 `grep ai_usage services/platform-core/src` → zero matches. Only contract-compliance meters. Enrichment uses an LLM and is unmetered, so spend is invisible.
 **Fix in Phase 2.**
 
-### D10 — `cancelled` job status is unreachable
-It is in the CHECK constraint; nothing writes it. Needed for admin job cancellation.
-**Use in Phase 6.**
+### D10 — `cancelled` job status is unreachable — **CLOSED (Phase 6)**
+It is in the CHECK constraint; nothing writes it.
+**Fixed in Phase 6.** `platform.cancel_job` is the writer. Cancelling clears the lease as well as setting the status, which is what makes it bite: `heartbeat_job` requires `status = 'running'`, so the handler's next heartbeat is rejected, `ctx.progress` raises `JobLost`, and the worker abandons the job without consuming a retry. A cancel that only relabelled the row would leave an expensive handler running and still spending, which is the opposite of what the operator asked for.
 
-### D11 — `heartbeat_job` and progress columns are dead
-`heartbeat()` and `set_progress()` have zero call sites. Long jobs cannot report progress and their leases cannot be extended, so a slow job gets reaped mid-flight.
-**Fix in Phase 6.**
+### D11 — `heartbeat_job` and progress columns are dead — **LARGELY FALSE; the real defect was worse (Phase 6)**
+The original claim was that `heartbeat()` and `set_progress()` have zero call sites. Reading the code showed otherwise: `set_progress()` never existed (heartbeat *is* the progress setter), and `heartbeat()` is called from two places — `ctx.progress`, used by grant ingest, rescore fan-out and enrichment, and a background keepalive the worker runs for every job.
 
-### D12 — Lease recovery only runs inside `claim_job`
+The wiring was there. **It had never worked.** See D20. The lesson recorded: this entry was written from the schema and a grep, not from reading the call path, and it sent Phase 6 looking for missing code instead of broken code.
+The one genuine gap — contract-compliance's LLM extraction handler never reporting progress — is now closed, which also makes that job cancellable.
+
+### D12 — Lease recovery only runs inside `claim_job` — **CLOSED (Phase 6)**
 There is no reaper. If nothing claims, expired leases are never swept, and a stuck job stays "running" forever with no observer.
-**Fix in Phase 6.**
+**Fixed in Phase 6.** `platform.reap_expired_leases` is extracted from inside `claim_job` rather than duplicated — two copies that drifted would recover jobs differently depending on which path found them. `claim_job` now calls it, so recovery stays prompt on the path about to pick up work, and `POST /admin/jobs/reap` runs it for the case the inline sweep cannot reach: no worker is claiming, so nothing triggers the sweep. Bounded per call so one sweep cannot become an unbounded UPDATE holding locks while the queue stalls behind it.
+
+### D19 — retry backoff was applied twice — **CLOSED (Phase 6)**
+The worker computes `min(60 * 2^(attempts-1), 3600)` and passes it to `finish_job`, which multiplied it *again* by `power(2, attempts - 1)` with no ceiling of its own. Attempt 2 waited 240s instead of the intended 120s, and the error compounded without bound as `max_attempts` rose.
+It survived because `max_attempts` is 3, so the visible damage was one wrong delay. Fixed now because Phase 6 puts "next retry at" in front of an operator, and a displayed time wrong by a growing multiple is worse than no time at all. The delay is used as given: the caller owns the policy, the function records the decision. A second multiplier also made the delay depend on who called it, so an operator retry would have been silently rescaled by an attempt count they had just reset.
+
+### D20 — `heartbeat()` raised on every call, so no lease was ever extended — **CLOSED (Phase 6)**
+`JobRepository.heartbeat` read `bool(row or {}).get("ok", False)` — `bool(...)` evaluates first, so `.get` was called on a boolean and every invocation raised `AttributeError`.
+
+**It had never worked, in any environment.** Two things hid it. The worker's background keepalive wraps the call in `except Exception: log.warning(...); continue`, so the failure appeared as a log line on a path nobody reads. And no test ever called `heartbeat` with a database that returned a row — the SQL smoke test exercised the *function*, not the Python wrapper.
+
+The consequences were real: no lease was ever renewed, so any handler running longer than the five-minute lease was reaped and retried mid-flight — doubling spend on exactly the expensive jobs the heartbeat exists to protect — and any handler calling `ctx.progress` failed outright at its first checkpoint. It was found by writing a test for cancel semantics, which needed a working heartbeat to assert against.
+
+**Fixed** by reading the row before coercing, and covered by two regression tests: one asserting a true result, one asserting the `NULL` a non-match produces is read as a lost lease rather than truthy.
+
+### D21 — `migrate.py` defaulted to production — **CLOSED (Phase 6)**
+The script resolved `ZEUS_MIGRATE_URL` from `.env.production.local` when nothing else was set, so the shortest command in the file — the one typed while developing — ran DDL against the live database. Migration 0018 reached production hours before its code did, during Phase 6.
+
+No harm done: `platform.jobs` held zero rows, nothing deployed called the new functions, and the two replaced functions were signature- and behaviour-compatible with the running worker. One function had landed with a signature later revised, and production was corrected to match the file its ledger claimed. That the blast radius was nil was luck, not design.
+
+**This is D17 repeating.** D17 put a local-only guard on the e2e scripts after a probe created real users in production. The guard was never extended to the one script whose entire purpose is to change the schema — the most dangerous tool in the repository had the least protection and the shortest command.
+**Fixed.** The default target is local. Production requires `--production` *and* typing the hostname back; `--yes` exists only for CI. The host is printed before anything runs.
 
 ### D13 — No admin authorization tests — **CLOSED (Phase 4, `0748d2c`)**
 Zero tests assert that a non-admin gets 403 from admin routes, or that `platform_admin` cannot be self-granted via token exchange.
@@ -596,7 +619,7 @@ Other instances pick the change up through the settings refresh, which **Phase 5
 
 ---
 
-## 9. Phase 6 — Job and queue observability
+## 9. Phase 6 — Job and queue observability — **DONE**
 
 **Goal:** You can see what is stuck and do something about it.
 
@@ -605,37 +628,41 @@ Other instances pick the change up through the settings refresh, which **Phase 5
 ### 9.1 Why this is needed
 There is currently **no way to see a job**. No list endpoint, no retry, no cancel. Lease recovery only runs inside `claim_job`, so if nothing claims, an expired lease is never swept (D12). A job can be stuck indefinitely with no observer.
 
-### 9.2 Routes
+### 9.2 Routes — **DONE**
 ```
-GET  /admin/jobs                  filter: status, module, tenant, kind, age
-GET  /admin/jobs/{id}             detail + payload + error + attempts
-POST /admin/jobs/{id}/retry       requeue: status→queued, attempts reset or not (decide)
-POST /admin/jobs/{id}/cancel      status→cancelled (fixes D10)
-GET  /admin/queue/health          depth by module/status, oldest queued age,
-                                  expired leases, failure rate, dedupe collisions
+GET  /admin/jobs              filter: status, module_id, tenant, kind, stuck; paginated
+GET  /admin/jobs/health       depth + oldest queued age per module, expired leases,
+                              overdue queued, 24h failure rate
+GET  /admin/jobs/{id}         full detail incl. payload and result — audited
+POST /admin/jobs/{id}/retry   attempts reset to 0 (Q6); 409 on live or superseded
+POST /admin/jobs/{id}/cancel  clears the lease so the handler stops (fixes D10)
+POST /admin/jobs/reap         recover dead leases when nothing is claiming (D12)
 ```
+Reads cross module boundaries, which no other caller may do: each service's `JobRepository` is bound to one `module_id`, and that binding is what keeps the services independently sellable. Rather than add an optional argument to defeat it — putting the escape hatch one keyword away from every caller — `JobAdminRepository` is a separate class reachable only from this router, behind `AdminDep`.
 
 ### 9.3 Reaper (fixes D12)
-A sweep that recovers expired leases independent of claims. Options: a scheduled QStash message, or run it on every `/admin/queue/health` call plus a cron. **Decide and document.** Recommendation: a real scheduled sweep, because health endpoints should observe, not mutate.
+**DONE.** A real scheduled sweep, `platform.reap_expired_leases`, extracted from inside `claim_job` rather than copied. Not run from the health endpoint: an endpoint that repaired the thing it reported on could never tell you whether you were observing a problem or causing one. `claim_job` still calls it, because recovering on the path about to pick up work is what keeps a retry prompt; the admin route covers the case that sweep cannot reach, where nothing is claiming at all.
 
 ### 9.4 Heartbeat (fixes D11)
-Wire `heartbeat()` and `set_progress()` into the long handlers — enrichment and extraction. Without it a genuinely slow job is reaped mid-flight and retried, doubling spend.
+**Superseded by D20.** The wiring already existed and was broken, not missing. Contract-compliance extraction now reports progress too, which is what makes it cancellable.
 
 ### 9.5 Payload redaction
-Job payloads may contain tenant data. The admin job view must redact or gate raw payload display, and viewing one must be audited.
+**DONE.** The list returns neither `payload` nor `result` — it is read casually and often, and those columns hold document text and model output. It returns a 500-character error excerpt instead, which is enough to triage from. The detail endpoint returns everything and is audited as `job.viewed`: it is the only route on the platform that hands an operator another tenant's data, and a record of who opened which job is what separates a support tool from an unaccountable one.
 
 ### 9.6 Stuck definition
-Make it explicit and consistent across UI and alerts:
-- expired lease and still `running`
-- `queued` with `run_after` in the past by more than N minutes
-- `attempts >= max_attempts` and `failed`
+**DONE.** One predicate, `_STUCK_SQL`, shared by the list filter and the health counters so the number on the dashboard and the rows behind it cannot disagree:
+- expired lease and still `running` — the worker died
+- `queued` with `run_after` more than five minutes past — nothing is claiming; five minutes is one lease, shorter and ordinary scheduling delay looks like a fault
+- `failed` with `attempts >= max_attempts` — the retries are over and it needs a human
+
+`failure_rate_24h` is `None`, not `0.0`, when nothing finished. Zero out of zero renders as a healthy green on a dashboard when it in fact means the queue did no work at all, which is the more alarming of the two states.
 
 ### Exit criteria
-- [ ] Job list, detail, retry, cancel work
-- [ ] Reaper recovers an expired lease with no claim traffic
-- [ ] Heartbeat keeps a long job alive past the lease window (proven with a test)
-- [ ] Queue health reports accurate depth against a seeded ledger
-- [ ] D10, D11, D12 closed
+- [x] Job list, detail, retry, cancel work
+- [x] Reaper recovers an expired lease with no claim traffic
+- [x] Heartbeat keeps a long job alive past the lease window (proven with a test)
+- [x] Queue health reports accurate depth against a seeded ledger
+- [x] D10, D11, D12 closed — plus D19, D20, D21 found and closed on the way
 
 ---
 
@@ -770,7 +797,7 @@ Required:
 | ~~Q3~~ | ~~Grant limit values.~~ **Answered 2026-09-16 by assumption:** seeded at the values the hardcoded fallbacks already used, so no existing tenant's behaviour changed. Those fallbacks are **3 scans and 25 matches** — the 4 and 50 previously recorded here were wrong. Seeded in migration 0014 as scans 3/10/30/100 and matches 25/100/unlimited/unlimited. Revisit when pricing is set commercially. | ~~Phase 1~~ |
 | Q4 | Page definition — how is a page counted for DOCX and plain text? Proposal: `ceil(chars / 3000)`. | Phase 7 |
 | ~~Q5~~ | ~~Suspension semantics — hard lockout or read-only?~~ **Answered 2026-09-16:** hard lockout for *new* work, and queued jobs run to completion. Implemented in Phase 5a — see §8.1. The drain half needed no new machinery: the worker authenticates by shared secret and never consults entitlements, so it was already the behaviour. What it needed was a test that fails if anyone changes it by accident. | ~~Phase 5~~ |
-| Q6 | Retry semantics — does an admin retry reset `attempts` to 0 or continue the count? | Phase 6 |
+| Q6 | Retry semantics — does an admin retry reset `attempts` to 0 or continue the count? | **Answered (Phase 6): reset.** An operator pressing retry is asserting the cause is fixed. Continuing the count means an exhausted job is retried once, immediately fails as exhausted again, and the button looks broken. The history is not lost — the prior count and error are kept in `last_error`, and the action is audited. |
 | Q7 | Enterprise plans have no limit rows, so unlimited. Intended? | Phase 7 |
 | ~~Q8~~ | ~~`ai_usage` cost backfill.~~ **Answered 2026-09-16 by measurement:** production has zero rows in both usage tables, so there is nothing to reconstruct. Moot. | ~~Phase 2~~ |
 | Q9 | Resend is rejecting production sends. Fix now? Invites and password reset both depend on email. | Phase 1 |

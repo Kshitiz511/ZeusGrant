@@ -18,8 +18,70 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SRC = ROOT / "services/platform-core/src/zeus_platform_core"
+KIT = ROOT / "packages/service-kit/src/zeus_service_kit"
 
 PATCHES: list[tuple[str, pathlib.Path, str, str]] = [
+    # --- Phase 6: job observability -----------------------------------------
+    (
+        "heartbeat reads .get on a bool again (the D20 bug)",
+        KIT / "jobs.py",
+        "        return bool(row and row.get(\"ok\"))",
+        "        return bool(row or {}).get(\"ok\", False)  # BREAK",
+    ),
+    (
+        "a lost lease is reported as held, so two workers write one job",
+        KIT / "jobs.py",
+        "        return bool(row and row.get(\"ok\"))",
+        "        return True  # BREAK",
+    ),
+    (
+        "progress no longer raises when the lease is gone, so cancel cannot bite",
+        KIT / "worker.py",
+        "        if not ok:\n            raise JobLost",
+        "        if False:\n            raise JobLost  # BREAK",
+    ),
+    (
+        "the job list returns payloads, leaking tenant data into a casual read",
+        SRC / "repositories/jobs_admin.py",
+        "_LIST_COLUMNS = \"\"\"\n    id, kind,",
+        "_LIST_COLUMNS = \"\"\"\n    payload, result,  -- BREAK\n    id, kind,",
+    ),
+    (
+        "opening a job is no longer audited",
+        SRC / "routers/admin_jobs.py",
+        '        "job.viewed",',
+        '        "job.opened",  # BREAK',
+    ),
+    (
+        "cancelling a finished job reports success instead of a conflict",
+        SRC / "routers/admin_jobs.py",
+        '    if job["status"] != "cancelled":',
+        "    if False:  # BREAK",
+    ),
+    (
+        "a superseded retry falls through to a 500",
+        SRC / "routers/admin_jobs.py",
+        '    if outcome == "superseded":',
+        "    if False:  # BREAK",
+    ),
+    (
+        "the stuck filter forgets jobs whose worker died",
+        SRC / "repositories/jobs_admin.py",
+        "    (status = 'running' AND locked_until < now())",
+        "    (FALSE)  -- BREAK",
+    ),
+    (
+        "an empty queue reports a healthy zero per cent failure rate",
+        SRC / "repositories/jobs_admin.py",
+        '"failure_rate_24h": round(failed / total, 4) if total else None,',
+        '"failure_rate_24h": round(failed / total, 4) if total else 0.0,  # BREAK',
+    ),
+    (
+        "the reap sweep becomes unbounded",
+        SRC / "routers/admin_jobs.py",
+        "max_rows: int = Field(default=1000, ge=1, le=10000)",
+        "max_rows: int = Field(default=1000)  # BREAK",
+    ),
     (
         "suspension no longer empties the entitlement snapshot",
         SRC / "domain/entitlements.py",

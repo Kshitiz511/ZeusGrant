@@ -52,6 +52,7 @@ from zeus_platform_core.repositories.billing import (
     SubscriptionRepository,
 )
 from zeus_platform_core.repositories.config_registry import ConfigRepository, PromptRepository
+from zeus_platform_core.repositories.jobs_admin import JobAdminRepository
 from zeus_platform_core.repositories.opportunities import OpportunityRepository
 from zeus_platform_core.repositories.plans import (
     ModelPricingRepository,
@@ -170,6 +171,17 @@ class Container:
     @cached_property
     def plans(self) -> PlanRepository:
         return PlanRepository(self.db)
+
+    @cached_property
+    def jobs_admin(self) -> JobAdminRepository:
+        """Cross-module job reads and operator writes, for the admin router only.
+
+        Separate from each service's own module-bound ``JobRepository``: that
+        binding is what stops one service seeing another's work, and an optional
+        argument to defeat it would put the escape hatch one keyword away from
+        every caller.
+        """
+        return JobAdminRepository(self.db)
 
     @cached_property
     def model_pricing(self) -> ModelPricingRepository:

@@ -213,18 +213,20 @@ class JobRepository:
 
         A false return is not a warning, it is a stop signal: another worker has
         taken over, and continuing would produce two writers for one job.
+
+        The SQL function returns NULL rather than false when the row does not
+        match -- it is a plain UPDATE ... RETURNING true -- so a miss arrives as
+        a None-valued column, and both are coerced here.
         """
-        return bool(
-            await self._db.fetch_one(
-                "SELECT platform.heartbeat_job($1::uuid, $2, $3, $4, $5) AS ok",
-                job_id,
-                worker_id,
-                lease_seconds,
-                done,
-                total,
-            )
-            or {}
-        ).get("ok", False)
+        row = await self._db.fetch_one(
+            "SELECT platform.heartbeat_job($1::uuid, $2, $3, $4, $5) AS ok",
+            job_id,
+            worker_id,
+            lease_seconds,
+            done,
+            total,
+        )
+        return bool(row and row.get("ok"))
 
     async def finish(
         self,

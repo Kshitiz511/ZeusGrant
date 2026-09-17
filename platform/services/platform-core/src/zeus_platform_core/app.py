@@ -17,6 +17,7 @@ from zeus_platform_core.container import Container
 from zeus_platform_core.health import router as health_router
 from zeus_platform_core.routers.admin import router as admin_router
 from zeus_platform_core.routers.admin_catalog import router as admin_catalog_router
+from zeus_platform_core.routers.admin_jobs import router as admin_jobs_router
 from zeus_platform_core.routers.admin_tenants import router as admin_tenants_router
 from zeus_platform_core.routers.auth import router as auth_router
 from zeus_platform_core.routers.billing import router as billing_router
@@ -75,6 +76,7 @@ def create_app(container: Container | None = None) -> FastAPI:
     app.include_router(admin_router)
     app.include_router(admin_tenants_router)
     app.include_router(admin_catalog_router)
+    app.include_router(admin_jobs_router)
     app.include_router(grants_router)
     app.include_router(usage_router)
 

@@ -39,6 +39,7 @@ from zeus_platform_core.container import Container
 from zeus_platform_core.domain.models import PLATFORM_ADMIN_ROLE
 
 TENANT = "11111111-1111-1111-1111-111111111111"
+JOB = "33333333-3333-3333-3333-333333333333"
 USER = "22222222-2222-2222-2222-222222222222"
 AUTH = {"Authorization": "Bearer good-token"}
 
@@ -123,6 +124,20 @@ ADMIN_ROUTES = [
     ("post", "/admin/prompts", {"name": "p", "body": "b"}, "/admin/prompts"),
     ("post", "/admin/prompts/activate", {"name": "p", "version": 1}, "/admin/prompts/activate"),
     ("get", "/admin/audit", None, "/admin/audit"),
+    # Job control (Phase 6). Job detail returns another tenant's payload and
+    # result, so an unguarded route here would be a data leak rather than
+    # merely an unauthorised action.
+    ("get", "/admin/jobs", None, "/admin/jobs"),
+    ("get", "/admin/jobs/health", None, "/admin/jobs/health"),
+    ("get", f"/admin/jobs/{JOB}", None, "/admin/jobs/{job_id}"),
+    (
+        "post",
+        f"/admin/jobs/{JOB}/cancel",
+        {"reason": "runaway"},
+        "/admin/jobs/{job_id}/cancel",
+    ),
+    ("post", f"/admin/jobs/{JOB}/retry", None, "/admin/jobs/{job_id}/retry"),
+    ("post", "/admin/jobs/reap", {}, "/admin/jobs/reap"),
     # Tenant control (Phase 5). Suspending a customer is the single most
     # destructive thing this API can do, so it is covered by the same
     # exhaustive guard sweep as everything else.
@@ -212,12 +227,12 @@ def test_the_admin_router_has_no_unguarded_routes():
     nobody added to this tuple would be invisible to the sweep, so the tuple is
     the one thing a reviewer has to check when a new admin router appears.
     """
-    from zeus_platform_core.routers import admin, admin_catalog, admin_tenants
+    from zeus_platform_core.routers import admin, admin_catalog, admin_jobs, admin_tenants
 
     listed = {(m.lower(), template) for m, _, _, template in ADMIN_ROUTES}
     actual = {
         (method.lower(), route.path)
-        for module in (admin, admin_catalog, admin_tenants)
+        for module in (admin, admin_catalog, admin_jobs, admin_tenants)
         for route in module.router.routes
         for method in getattr(route, "methods", set())
         if method != "HEAD"

@@ -57,6 +57,16 @@ async def analyze_job(ctx: JobContext) -> dict[str, Any]:
     tenant_id: str = ctx.payload["tenant_id"]
     contract_id: str = ctx.payload["contract_id"]
 
+    # Extraction is one long LLM call, so there is no loop to report from. The
+    # two checkpoints still earn their place: the first is what makes an
+    # operator's cancel bite, because ctx.progress raises JobLost once the job
+    # is no longer 'running', and without it this handler would run to
+    # completion -- and to full model spend -- after being cancelled. The second
+    # distinguishes "still calling the model" from "finished but not yet
+    # recorded" on the admin screen, which are minutes apart for a long
+    # contract.
+    await ctx.progress(0, 2)
+
     # Jobs run outside a request context, so bind the payload's tenant
     # explicitly — RLS applies to the worker path exactly like the API path.
     with tenant_scope(tenant_id):
@@ -74,6 +84,8 @@ async def analyze_job(ctx: JobContext) -> dict[str, Any]:
         except ContractHasNoText:
             log.warning("contract.analyze_empty contract=%s", contract_id)
             return {"contract_id": contract_id, "skipped": "contract has no text"}
+
+    await ctx.progress(2, 2)
 
     return {
         "contract_id": result.contract_id,
