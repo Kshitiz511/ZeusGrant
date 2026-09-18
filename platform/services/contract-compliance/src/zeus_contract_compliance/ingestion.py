@@ -45,6 +45,41 @@ class DuplicateDocumentError(ValueError):
         self.existing = existing
 
 
+class QuotaExceededError(Exception):
+    """Raised when an upload would exceed a plan limit. Surfaced as 402.
+
+    Carries the numbers rather than only a sentence, so the UI can render a
+    progress bar and the caller can tell "you are at 100 of 100" from "this
+    one file is 40 pages and your cap is 25" without parsing prose.
+    """
+
+    def __init__(self, message: str, *, key: str, limit: int, used: int, requested: int = 0):
+        super().__init__(message)
+        self.key = key
+        self.limit = limit
+        self.used = used
+        self.requested = requested
+
+
+@dataclass(frozen=True, slots=True)
+class IngestQuota:
+    """The ceilings this upload must respect. ``None`` means unlimited.
+
+    Resolved by the caller from the tenant's entitlements and passed in, so
+    this service never reaches for claims itself and stays testable without an
+    entitlement store. ``None`` for the whole quota means "not enforced here"
+    -- used by internal callers that are not a customer upload.
+
+    Every field being ``None``-means-unlimited is deliberate and matches
+    DEC-10. Reading a missing limit as zero, or as a default, is what made
+    enterprise plans behave like the free tier -- see D22.
+    """
+
+    pages_per_document: int | None = None
+    pages_per_month: int | None = None
+    documents_per_month: int | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class IngestResult:
     document: Document
@@ -86,16 +121,64 @@ class IngestionService:
         data: bytes,
         uploaded_by: str | None,
         replace_body: bool,
+        quota: IngestQuota | None = None,
     ) -> IngestResult:
         """Attach a file to a contract and return the extracted text.
 
         ``replace_body`` sets the contract body to this document's text, making
         it the source the AI analyzes.
+
+        Quota checks are ordered by what they cost to evaluate and by what they
+        would waste if they fired late. The document count is known before the
+        file is parsed, so it is checked first and a tenant already at their
+        monthly cap never pays the parse. Page checks need the page count and
+        so must follow extraction -- but they still run before the bytes are
+        written to storage and before any row is inserted, so a refused upload
+        leaves nothing behind and costs no AI spend.
         """
         self._validate_size(data)
+        quota = quota or IngestQuota()
+
+        if quota.documents_per_month is not None:
+            used = await self._documents.documents_this_month(tenant_id)
+            if used >= quota.documents_per_month:
+                raise QuotaExceededError(
+                    f"Plan limit reached: {quota.documents_per_month} documents this month. "
+                    "Upgrade the Contract Compliance plan to process more.",
+                    key="documents_per_month",
+                    limit=quota.documents_per_month,
+                    used=used,
+                )
 
         # Raises UnsupportedDocumentError / DocumentParseError, both 4xx.
         extracted: ExtractedDocument = extract_document(data, filename=filename)
+
+        if quota.pages_per_document is not None and extracted.pages > quota.pages_per_document:
+            raise QuotaExceededError(
+                f"This document is {extracted.pages} pages; your plan allows "
+                f"{quota.pages_per_document} per document. Split it or upgrade the plan.",
+                key="pages_per_document",
+                limit=quota.pages_per_document,
+                used=0,
+                requested=extracted.pages,
+            )
+
+        if quota.pages_per_month is not None:
+            used_pages = await self._documents.pages_this_month(tenant_id)
+            # Rejected whole rather than part-processed: half a contract
+            # analysed is worse than none, and there is no way to bill for it
+            # honestly.
+            if used_pages + extracted.pages > quota.pages_per_month:
+                remaining = max(0, quota.pages_per_month - used_pages)
+                raise QuotaExceededError(
+                    f"This document is {extracted.pages} pages and you have "
+                    f"{remaining} of {quota.pages_per_month} left this month. "
+                    "Upgrade the Contract Compliance plan to process more.",
+                    key="pages_per_month",
+                    limit=quota.pages_per_month,
+                    used=used_pages,
+                    requested=extracted.pages,
+                )
 
         duplicate = await self._documents.find_by_checksum(
             tenant_id, contract_id, extracted.checksum
@@ -119,6 +202,8 @@ class IngestionService:
                 storage_key=key,
                 checksum=extracted.checksum,
                 extracted_chars=len(extracted.text),
+                pages=extracted.pages,
+                page_basis=extracted.page_basis,
                 uploaded_by=uploaded_by,
             )
         except Exception:

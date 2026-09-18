@@ -1,20 +1,31 @@
 #!/usr/bin/env python3
-"""Verify the hosted database matches what the migrations intended.
+"""Verify a database matches what the migrations intended.
 
 Applying without errors is not the same as landing correctly — a managed
 Postgres may silently differ on roles, extensions or row-level security. RLS in
 particular is the control that keeps one tenant's contracts away from another,
 so it is checked explicitly rather than assumed.
+
+Usage:
+    python scripts/verify_schema.py                # local
+    python scripts/verify_schema.py --production   # hosted
+
+**The default target is local, and the host is always printed.** This script
+used to read ``.env.production.local`` unconditionally and announce nothing, so
+it reported on production while appearing to describe the laptop. Read-only, so
+nothing broke — but it is the same defect as D21 and the reason its "1
+unapplied" was right when local was fully migrated.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
-import os
 import sys
 from pathlib import Path
 
-ENV_FILE = Path(__file__).resolve().parent.parent / ".env.production.local"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _dsn import resolve_dsn  # noqa: E402
 
 EXPECTED_PLATFORM = {
     "ai_usage",
@@ -39,21 +50,21 @@ EXPECTED_PLATFORM = {
 EXPECTED_CC = {"ai_usage", "audit_log", "contracts", "documents", "obligations"}
 
 
-def resolve_dsn() -> str:
-    dsn = os.environ.get("ZEUS_MIGRATE_URL")
-    if dsn:
-        return dsn
-    for line in ENV_FILE.read_text().splitlines():
-        if line.startswith("ZEUS_MIGRATE_URL="):
-            return line.split("=", 1)[1].strip()
-    print("No ZEUS_MIGRATE_URL found.")
-    sys.exit(1)
+def _args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--production",
+        action="store_true",
+        help="verify the hosted database instead of the local one",
+    )
+    return p.parse_args()
 
 
 async def main() -> int:
     import asyncpg
 
-    conn = await asyncpg.connect(resolve_dsn(), timeout=30)
+    dsn = resolve_dsn(production=_args().production)
+    conn = await asyncpg.connect(dsn, timeout=30)
     passed = failed = 0
 
     def check(label: str, ok: bool, detail: str = "") -> None:

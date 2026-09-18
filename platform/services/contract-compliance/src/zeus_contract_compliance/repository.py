@@ -36,7 +36,7 @@ _OBLIGATION_COLS = (
 )
 _DOCUMENT_COLS = (
     "id::text, tenant_id::text, contract_id::text, filename, content_type, "
-    "byte_size, checksum, extracted_chars, created_at"
+    "byte_size, checksum, extracted_chars, pages, page_basis, created_at"
 )
 
 
@@ -330,14 +330,17 @@ class DocumentRepository:
         storage_key: str,
         checksum: str,
         extracted_chars: int,
+        pages: int,
+        page_basis: str,
         uploaded_by: str | None,
     ) -> Document:
         row = await self._db.fetch_one(
             f"""
             INSERT INTO contract_compliance.documents
                 (tenant_id, contract_id, filename, content_type, byte_size,
-                 storage_key, checksum, extracted_chars, uploaded_by)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 storage_key, checksum, extracted_chars, pages, page_basis,
+                 uploaded_by)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING {_DOCUMENT_COLS}
             """,
             tenant_id,
@@ -348,6 +351,8 @@ class DocumentRepository:
             storage_key,
             checksum,
             extracted_chars,
+            pages,
+            page_basis,
             uploaded_by,
         )
         return Document(**row)
@@ -424,6 +429,47 @@ class DocumentRepository:
             checksum,
         )
         return Document(**row) if row else None
+
+    async def pages_this_month(self, tenant_id: str) -> int:
+        """Billable pages ingested by this tenant since the start of the month.
+
+        Summed from the documents table rather than a separate counter, for the
+        same reason grant scans are counted from the job ledger: the rows are
+        the record of what was actually accepted, so the total cannot drift
+        from reality and there is no counter for a client to write to.
+
+        This is affordable where summing ``platform.ai_usage`` would not be.
+        ``ai_usage`` gains a row per model call and is summed per request;
+        ``documents`` gains one row per upload, and
+        ``idx_cc_documents_tenant_month`` covers the sum with ``pages``
+        INCLUDEd, so the month is a range scan that never touches the heap.
+
+        Month boundaries are UTC, matching the grant scan quota, so a customer
+        holding two subscriptions sees both reset at the same moment.
+        """
+        row = await self._db.fetch_one(
+            """
+            SELECT COALESCE(sum(pages), 0)::bigint AS n
+              FROM contract_compliance.documents
+             WHERE tenant_id = $1
+               AND created_at >= date_trunc('month', now() AT TIME ZONE 'utc')
+            """,
+            tenant_id,
+        )
+        return int((row or {}).get("n") or 0)
+
+    async def documents_this_month(self, tenant_id: str) -> int:
+        """Documents ingested by this tenant since the start of the month."""
+        row = await self._db.fetch_one(
+            """
+            SELECT count(*)::bigint AS n
+              FROM contract_compliance.documents
+             WHERE tenant_id = $1
+               AND created_at >= date_trunc('month', now() AT TIME ZONE 'utc')
+            """,
+            tenant_id,
+        )
+        return int((row or {}).get("n") or 0)
 
 
 class AiUsageRepository:

@@ -60,14 +60,14 @@ class FakeLlm:
         raise NotImplementedError
 
 
-def _seed_cache(cache: MemoryCache, *, contracts_max: int | None) -> None:
+def _seed_cache(cache: MemoryCache, *, limits: dict) -> None:
     claims = {
         "tenant_id": TENANT,
         "modules": {
             "contract_compliance": {
                 "status": "active",
                 "plan_id": "cc_growth",
-                "limits": {"contracts_max": contracts_max},
+                "limits": limits,
             }
         },
     }
@@ -75,7 +75,14 @@ def _seed_cache(cache: MemoryCache, *, contracts_max: int | None) -> None:
     cache._store[f"entitlements:{TENANT}"] = (json.dumps(claims), None)  # noqa: SLF001
 
 
-def _build(*, entitled: bool, contracts_max: int | None = 5, contract_count: int = 0, llm=None):
+def _build(
+    *,
+    entitled: bool,
+    contracts_max: int | None = 5,
+    contract_count: int = 0,
+    llm=None,
+    limits: dict | None = None,
+):
     db = FakeDatabase()
     created: list[dict] = []
 
@@ -146,7 +153,12 @@ def _build(*, entitled: bool, contracts_max: int | None = 5, contract_count: int
 
     cache = MemoryCache()
     if entitled:
-        _seed_cache(cache, contracts_max=contracts_max)
+        # ``limits`` overrides wholesale so a test can seed an enterprise plan:
+        # no keys at all, which DEC-10 reads as unlimited.
+        _seed_cache(
+            cache,
+            limits={"contracts_max": contracts_max} if limits is None else limits,
+        )
     else:
         cache._store[f"entitlements:{TENANT}"] = (  # noqa: SLF001
             json.dumps({"tenant_id": TENANT, "modules": {}}),
@@ -203,6 +215,20 @@ def test_contract_limit_enforced():
     client = _build(entitled=True, contracts_max=1, contract_count=1)
     resp = client.post("/contracts", headers=_auth(), json={"title": "Second"})
     assert resp.status_code == 402
+
+
+def test_a_null_limit_is_unlimited():
+    """DEC-10: a NULL value is no ceiling, however many already exist."""
+    client = _build(entitled=True, contracts_max=None, contract_count=9_999)
+    assert client.post("/contracts", headers=_auth(), json={"title": "N"}).status_code == 201
+
+
+def test_an_enterprise_plan_with_no_limit_rows_is_unlimited():
+    """Every ``*_enterprise`` plan ships with zero limit rows, so the key is
+    absent rather than NULL. Reading that absence as a default is D22, and it
+    hands the most expensive plan the smallest allowance."""
+    client = _build(entitled=True, limits={}, contract_count=9_999)
+    assert client.post("/contracts", headers=_auth(), json={"title": "E"}).status_code == 201
 
 
 def test_ai_analyze_persists_obligations():

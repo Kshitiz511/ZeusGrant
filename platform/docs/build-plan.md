@@ -146,6 +146,15 @@ Fallback is kept for the entitlement-missing case rather than raising: a limit c
 
 **Answers §10.5's open question.** Zero limit rows on enterprise *was* intended. The bug was the reader, not the data.
 
+### D23 — operational scripts silently targeted production — **CLOSED (Phase 7)**
+`verify_schema.py` resolved its DSN by reading `.env.production.local` unconditionally and printed no host. Running it during Phase 7 reported "migration ledger 23/24, 1 unapplied" while the local database was fully migrated — it had been describing **production** all along, and the discrepancy was the only reason anyone noticed.
+
+Read-only, so nothing broke. But eleven other scripts resolve a DSN the same way, two of them write: `backfill_trials.py` and `provision_db_role.py`.
+
+**This is D21 repeating, which was itself D17 repeating.** Each time the guard was applied to the single script that had just caused a problem, and never to the class. D17 guarded the e2e probes. D21 guarded `migrate.py`. Neither guarded the other ten.
+
+**Fixed by building the guard once.** `scripts/_dsn.py` provides `resolve_dsn(production=...)`, `confirm_production()` and `require_local()`: local by default, production behind an explicit flag, the host **printed to stderr** before anything runs — stderr specifically, because these scripts are routinely piped through `tail`, and a banner on stdout is exactly the banner that scrolled away when 0018 reached production. `verify_schema.py` now takes `--production` and reports 10/10 local, 23/24 production, each saying which it read.
+
 ### D13 — No admin authorization tests — **CLOSED (Phase 4, `0748d2c`)**
 Zero tests assert that a non-admin gets 403 from admin routes, or that `platform_admin` cannot be self-granted via token exchange.
 **Fixed in Phase 4.** `tests/test_platform_admin.py` (25 tests) covers both, parametrised over every admin route, plus a structural test asserting the parametrised list matches the router's registered routes so a new endpoint cannot escape it. Verified by breaking both guarantees and watching the tests fail.
@@ -706,14 +715,19 @@ Reads cross module boundaries, which no other caller may do: each service's `Job
 **Depends on:** Phases 2, 5.
 
 ### 10.1 New limit keys
-| Key | Meaning | Enforced where |
-|---|---|---|
-| `tokens_per_month` | AI token ceiling | Pre-flight in extraction and enrichment |
-| `ai_cost_per_month_usd` | Spend ceiling | Same |
-| `documents_per_month` | Documents processed | Document upload/analyze |
-| `pages_per_document` | Page cap per document | Ingestion, before extraction |
-| `pages_per_month` | Total pages | Ingestion |
-| `storage_mb` | Stored bytes | Upload |
+| Key | Meaning | Enforced where | Status |
+|---|---|---|---|
+| `pages_per_document` | Page cap per document | Ingestion, after extraction, before storage | **DONE** |
+| `pages_per_month` | Total pages | Ingestion | **DONE** |
+| `documents_per_month` | Documents processed | Ingestion, before extraction | **DONE** |
+| `tokens_per_month` | AI token ceiling | Pre-flight in extraction and enrichment | TODO |
+| `ai_cost_per_month_usd` | Spend ceiling | Same | TODO |
+| `storage_mb` | Stored bytes | Upload | TODO |
+
+The three ingestion keys are enforced but **not yet seeded on any plan**, so they are absent everywhere and therefore unlimited everywhere (DEC-10). That is the correct resting state: the mechanism ships before the numbers, so seeding a plan is a data change rather than a deploy. Seeding them is the next task.
+
+### 10.1b Superseded
+The original table proposed enforcing `pages_per_document` *before* extraction. That is not possible: the page count is a product of extraction, so the check has to follow it. It still runs before any byte is stored and before any row is written, which is what the ordering was actually protecting.
 
 ### 10.2 Page counting — **DONE (counting); storage outstanding**
 **There was no page concept anywhere in the codebase.** PDFs give a page count via `pypdf`. DOCX does not have pages in any meaningful sense until rendered. Plain text has none.
@@ -722,7 +736,13 @@ Reads cross module boundaries, which no other caller may do: each service's `Job
 
 The PDF test fixture was rewritten as part of this. It previously called `PdfWriter.add_blank_page`, which produces pages with **no text at all** — so every "PDF extraction" test was really asserting that an empty document is rejected, and could not have exercised extraction or a page count. It now writes a real PDF with a text content stream, by hand, rather than adding a rendering dependency for a fixture.
 
-**Still outstanding:** store `pages` on the document row at ingestion, and enforce `pages_per_document` / `pages_per_month` against it.
+**Still outstanding:** none — migration `0006_document_pages.sql` stores `pages` and `page_basis` on every document row, backfilling existing rows with the character estimate (the rule's own answer for a format that cannot tell us) and marking them `estimated` so they are never mistaken for parser counts. `pages >= 1` and `page_basis IN ('counted','estimated')` are CHECK constraints, because a zero-page document cannot be billed and the basis is shown to customers verbatim.
+
+`pages_per_document`, `pages_per_month` and `documents_per_month` are enforced in `IngestionService.ingest` via an `IngestQuota`, resolved by the router from the tenant's claims. The check order is deliberate: document count first (known before parsing, so a tenant at their cap never pays for the parse), then page checks after extraction but **before** any byte reaches storage and before any row is inserted — a refused upload leaves nothing behind and costs no AI spend. `pages_per_month` counts the document being uploaded, so 95 used plus a 10-page file against a cap of 100 is a refusal rather than a silent overshoot to 105.
+
+The monthly totals are summed from `contract_compliance.documents` rather than a counter table, for the same reason grant scans are counted from the job ledger: the rows are the record of what was actually accepted, so the total cannot drift and there is no counter for a client to write to. This is affordable where summing `ai_usage` would not be — `documents` gains one row per upload, not one per model call, and `idx_cc_documents_tenant_month` covers the sum with `pages` INCLUDEd.
+
+**The probe caught an index defect.** The planner preferred the pre-existing `idx_cc_documents_tenant(tenant_id)` and turned what should have been an index-only scan into a heap fetch. That index is redundant now — the new one leads with the same column — so 0006 drops it, removing both the wrong plan and a write on every upload.
 
 ### 10.3 Enforcement (per DEC-5)
 Pre-flight against remaining budget, post-flight recording actual. The token overshoot is bounded by one operation and is a documented property.

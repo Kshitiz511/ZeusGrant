@@ -57,6 +57,8 @@ from zeus_contract_compliance.domain import (
 )
 from zeus_contract_compliance.ingestion import (
     DuplicateDocumentError,
+    IngestQuota,
+    QuotaExceededError,
     UploadTooLargeError,
 )
 
@@ -78,18 +80,32 @@ ContainerDep = Annotated[Container, Depends(_container)]
 # --- helpers ----------------------------------------------------------------
 
 
-async def _enforce_contract_limit(container: Container, tenant_id: str) -> None:
-    """Refuse a new contract once the plan's ceiling is reached.
+async def _plan_limits(container: Container, tenant_id: str) -> dict[str, Any]:
+    """The tenant's limit map for this module, or empty when unentitled.
 
-    Under DEC-10 an absent limit key means unlimited, which is how every
-    ``*_enterprise`` plan is seeded -- with no limit rows at all. Grant
-    Intelligence read the same absence as the free-tier default until D22, so
-    the two modules disagreed about what the same data meant. This side was
-    right; keep it that way.
+    One place reads claims, so every limit in this service agrees about what
+    the data means. D22 happened because two modules each resolved limits
+    their own way and quietly disagreed.
     """
     claims = await container.security.claims_for(tenant_id)
     ent = (claims.get("modules") or {}).get(MODULE_ID) or {}
-    limit = (ent.get("limits") or {}).get("contracts_max")
+    return ent.get("limits") or {}
+
+
+def _ceiling(limits: dict[str, Any], key: str) -> int | None:
+    """A stated ceiling, or ``None`` for unlimited (DEC-10).
+
+    An absent key and a NULL value mean the same thing: no ceiling. Every
+    ``*_enterprise`` plan is seeded with no limit rows at all and relies on
+    this. Do not add a default here -- that is precisely the D22 defect.
+    """
+    value = limits.get(key)
+    return None if value is None else int(value)
+
+
+async def _enforce_contract_limit(container: Container, tenant_id: str) -> None:
+    """Refuse a new contract once the plan's ceiling is reached."""
+    limit = _ceiling(await _plan_limits(container, tenant_id), "contracts_max")
     if limit is None:  # unlimited
         return
     used = await container.contracts.count_for_tenant(tenant_id)
@@ -269,6 +285,13 @@ async def upload_document(
     max_bytes = container.settings.storage.max_upload_bytes
     data = await _read_capped(file, max_bytes)
 
+    limits = await _plan_limits(container, tenant_id)
+    quota = IngestQuota(
+        pages_per_document=_ceiling(limits, "pages_per_document"),
+        pages_per_month=_ceiling(limits, "pages_per_month"),
+        documents_per_month=_ceiling(limits, "documents_per_month"),
+    )
+
     try:
         result = await container.ingestion.ingest(
             tenant_id=tenant_id,
@@ -277,7 +300,23 @@ async def upload_document(
             data=data,
             uploaded_by=actor_id,
             replace_body=replace_body,
+            quota=quota,
         )
+    except QuotaExceededError as exc:
+        # 402, not 403: the request is authorised and well-formed, it is the
+        # plan that is in the way. The numbers are echoed so the UI can show
+        # progress rather than only an apology.
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={
+                "error": "limit_exceeded",
+                "message": str(exc),
+                "limit_key": exc.key,
+                "limit": exc.limit,
+                "used": exc.used,
+                "requested": exc.requested,
+            },
+        ) from exc
     except UploadTooLargeError as exc:
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(exc)
@@ -301,6 +340,8 @@ async def upload_document(
             "filename": result.document.filename,
             "bytes": result.document.byte_size,
             "extracted_chars": result.document.extracted_chars,
+            "pages": result.document.pages,
+            "page_basis": result.document.page_basis,
             "truncated": result.truncated,
         },
     )

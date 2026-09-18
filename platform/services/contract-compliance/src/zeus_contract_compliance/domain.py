@@ -138,6 +138,11 @@ class Document(BaseModel):
     byte_size: int
     checksum: str
     extracted_chars: int = 0
+    #: Billable pages under DEC-11. Never below 1.
+    pages: int = 1
+    #: ``counted`` when the format reported it, ``estimated`` when derived
+    #: from length. Shown to customers, so a bill can be explained.
+    page_basis: str = "estimated"
     created_at: datetime | None = None
 
 
