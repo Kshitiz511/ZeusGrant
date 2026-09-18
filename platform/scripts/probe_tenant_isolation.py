@@ -23,6 +23,11 @@ import httpx
 
 ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = ROOT / ".env.production.local"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _dsn import announce  # noqa: E402
+
 BASE = os.environ.get("ZEUS_PROD_URL", "https://zeus-platform-dun.vercel.app")
 
 PROBES = (
@@ -57,7 +62,13 @@ async def main() -> int:
     from zeus_platform_core.container import Container
 
     conn = await asyncpg.connect(
-        os.environ["ZEUS_DATABASE_URL"], timeout=30, statement_cache_size=0
+        announce(
+            os.environ["ZEUS_DATABASE_URL"],
+            role="runtime",
+            purpose="tenant isolation probe",
+        ),
+        timeout=30,
+        statement_cache_size=0
     )
     try:
         attacker = await conn.fetchrow(

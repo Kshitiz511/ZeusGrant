@@ -10,19 +10,16 @@ one that fails. Running the query twice is the point of this probe.
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
-ENV_FILE = Path(__file__).resolve().parent.parent / ".env.production.local"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _dsn import required_dsn  # noqa: E402
 
 
 def load(name: str) -> str:
-    for line in ENV_FILE.read_text().splitlines():
-        if line.startswith(f"{name}="):
-            return line.split("=", 1)[1].strip()
-    print(f"{name} not found in {ENV_FILE.name}")
-    sys.exit(1)
+    return required_dsn(name, purpose="pooler reachability")
 
 
 async def probe(label: str, url: str, **kwargs) -> bool:
@@ -47,8 +44,8 @@ async def probe(label: str, url: str, **kwargs) -> bool:
 
 
 async def main() -> int:
-    session_url = os.environ.get("ZEUS_MIGRATE_URL") or load("ZEUS_MIGRATE_URL")
-    txn_url = os.environ.get("ZEUS_DATABASE_URL") or load("ZEUS_DATABASE_URL")
+    session_url = load("ZEUS_MIGRATE_URL")
+    txn_url = load("ZEUS_DATABASE_URL")
 
     print("\nSupabase pooler probe\n")
     results = [

@@ -13,6 +13,10 @@ from pathlib import Path
 
 ENV_FILE = Path(__file__).resolve().parent.parent / ".env.production.local"
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _dsn import announce  # noqa: E402
+
 
 def load_env() -> dict[str, str]:
     if not ENV_FILE.exists():
@@ -30,6 +34,8 @@ def load_env() -> dict[str, str]:
 
 async def check_postgres(label: str, url: str) -> tuple[bool, str]:
     import asyncpg
+
+    announce(url, role=label, purpose="connectivity check")
 
     # Mirror PostgresDatabase: the transaction pooler (:6543) hands each query a
     # different backend, so asyncpg's prepared-statement cache collides.

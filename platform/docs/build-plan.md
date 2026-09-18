@@ -155,6 +155,17 @@ Read-only, so nothing broke. But eleven other scripts resolve a DSN the same way
 
 **Fixed by building the guard once.** `scripts/_dsn.py` provides `resolve_dsn(production=...)`, `confirm_production()` and `require_local()`: local by default, production behind an explicit flag, the host **printed to stderr** before anything runs — stderr specifically, because these scripts are routinely piped through `tail`, and a banner on stdout is exactly the banner that scrolled away when 0018 reached production. `verify_schema.py` now takes `--production` and reports 10/10 local, 23/24 production, each saying which it read.
 
+**The first attempt broke CI**, which was the useful part. The new resolver read the env file before the environment, so CI's exported `ZEUS_MIGRATE_URL` — pointing at its ephemeral Postgres — was ignored and the run fell through to `localhost:5433`. Split into `env_dsn()` and `file_dsn()`, an exported DSN winning over everything, and the banner now names its source as well as its host. A guard that resolves differently from the thing it is guarding is not a guard.
+
+**Then applied to the class, not the instance** — the whole point of the entry. All eleven remaining scripts now resolve through `_dsn.py`. They divided into two kinds, and the distinction matters:
+
+- Scripts that *could* target either database take `resolve_dsn(production=...)`: local unless asked.
+- Scripts whose *purpose* is production — provisioning the runtime role, auditing live RLS, checking live connectivity — take `required_dsn()` / `announce()`. A flag would be noise; what they need is to say out loud what they are touching.
+
+The two that **write** got both: `provision_db_role.py` and `backfill_trials.py` announce and then call `confirm_production()` before rotating a password or creating subscriptions. `audit_rls.py` deliberately connects as the runtime role rather than the owner — an owner bypasses the very policies the script exists to audit, so it would have reported success no matter what the policies said.
+
+**The banner immediately found the mirror-image fault.** `who_is_in_prod.py` — a script named for production — reported on `localhost:5433`, because a shell had `ZEUS_DATABASE_URL` exported to local. Harmless, read-only, and invisible for as long as it had existed. Env-wins is still correct (CI depends on it); what was missing was ever saying so. Both directions now verified: unset, it reaches `aws-0-us-east-2.pooler.supabase.com:6543` and prints `PRODUCTION`; exported, it reaches local and prints `local`.
+
 ### D13 — No admin authorization tests — **CLOSED (Phase 4, `0748d2c`)**
 Zero tests assert that a non-admin gets 403 from admin routes, or that `platform_admin` cannot be self-granted via token exchange.
 **Fixed in Phase 4.** `tests/test_platform_admin.py` (25 tests) covers both, parametrised over every admin route, plus a structural test asserting the parametrised list matches the router's registered routes so a new endpoint cannot escape it. Verified by breaking both guarantees and watching the tests fail.

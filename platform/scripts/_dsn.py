@@ -125,3 +125,48 @@ def require_local(dsn: str, *, what: str = "this script") -> None:
     """Refuse outright. For probes that create rows they cannot clean up."""
     if not is_local(dsn):
         sys.exit(f"{what} refuses to run against non-local host: {host_of(dsn)}")
+
+
+def env_value(name: str) -> str | None:
+    """A named setting from the environment, else the untracked env file.
+
+    Scripts need more than one DSN -- ``ZEUS_MIGRATE_URL`` is the owner role,
+    ``ZEUS_DATABASE_URL`` is the unprivileged runtime role -- and which one a
+    script uses changes what it is able to see. A check for tenant isolation
+    run as the owner will report success whatever the policies say.
+    """
+    return os.environ.get(name) or _from_file(name)
+
+
+def _from_file(name: str) -> str | None:
+    if not ENV_FILE.exists():
+        return None
+    for line in ENV_FILE.read_text().splitlines():
+        if line.startswith(f"{name}="):
+            return line.split("=", 1)[1].strip() or None
+    return None
+
+
+def announce(dsn: str, *, role: str = "", purpose: str = "") -> str:
+    """Print the target to stderr and return the DSN unchanged.
+
+    For scripts whose whole purpose *is* production -- provisioning a role,
+    auditing the live database. They do not need a flag, they need to say so
+    out loud. Returned unchanged so it can wrap a connect call inline.
+    """
+    label = "local" if is_local(dsn) else "PRODUCTION"
+    bits = [f"target: {label}  {host_of(dsn)}"]
+    if role:
+        bits.append(f"as {role}")
+    if purpose:
+        bits.append(f"({purpose})")
+    print("  ".join(bits), file=sys.stderr)
+    return dsn
+
+
+def required_dsn(name: str, *, role: str = "", purpose: str = "") -> str:
+    """``env_value`` that exits if unset, and announces what it found."""
+    dsn = env_value(name)
+    if not dsn:
+        sys.exit(f"{name} is not set and {ENV_FILE.name} does not define it.")
+    return announce(dsn, role=role, purpose=purpose)

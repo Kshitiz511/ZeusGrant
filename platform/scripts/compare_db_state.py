@@ -21,6 +21,10 @@ import asyncpg
 ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = ROOT / ".env.production.local"
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _dsn import announce, env_value  # noqa: E402
+
 LOCAL_DSN = os.environ.get(
     "ZEUS_LOCAL_URL", "postgresql://zeus:zeus@localhost:5433/zeus"
 )
@@ -32,13 +36,10 @@ NEW_FUNCS = ["scorer_version", "focus_tsquery", "score_opportunities_for_tenant"
 
 
 def prod_dsn() -> str | None:
-    if os.environ.get("ZEUS_MIGRATE_URL"):
-        return os.environ["ZEUS_MIGRATE_URL"]
-    if ENV_FILE.exists():
-        for line in ENV_FILE.read_text().splitlines():
-            if line.startswith("ZEUS_MIGRATE_URL="):
-                return line.split("=", 1)[1].strip()
-    return None
+    dsn = env_value("ZEUS_MIGRATE_URL")
+    if dsn:
+        announce(dsn, role="owner", purpose="schema comparison")
+    return dsn
 
 
 async def inspect(label: str, dsn: str) -> None:

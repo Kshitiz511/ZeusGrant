@@ -18,18 +18,19 @@ import sys
 import uuid
 from pathlib import Path
 
-ENV_FILE = Path(__file__).resolve().parent.parent / ".env.production.local"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _dsn import required_dsn  # noqa: E402
 
 TENANT_A = str(uuid.uuid4())
 TENANT_B = str(uuid.uuid4())
 
 
 def load(name: str) -> str:
-    for line in ENV_FILE.read_text().splitlines():
-        if line.startswith(f"{name}="):
-            return line.split("=", 1)[1].strip()
-    print(f"{name} not found in {ENV_FILE.name}")
-    sys.exit(1)
+    # Announced because this script connects as two different roles, and which
+    # one is in use decides whether a pass means anything: an owner bypasses
+    # RLS and will report isolation working when it is not.
+    return required_dsn(name, purpose="tenant isolation check")
 
 
 async def seed(conn, tenant_id: str, title: str) -> str:

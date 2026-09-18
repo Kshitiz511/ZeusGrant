@@ -12,12 +12,12 @@ Read-only. Points at production by default.
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-ENV_FILE = ROOT / ".env.production.local"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _dsn import required_dsn  # noqa: E402
 
 QUERY = """
 SELECT n.nspname AS schema,
@@ -40,13 +40,11 @@ SELECT n.nspname AS schema,
 
 
 def dsn() -> str:
-    url = os.environ.get("ZEUS_DATABASE_URL")
-    if url:
-        return url
-    for line in ENV_FILE.read_text().splitlines():
-        if line.startswith("ZEUS_DATABASE_URL="):
-            return line.split("=", 1)[1].strip()
-    sys.exit("No ZEUS_DATABASE_URL found.")
+    # The runtime role deliberately, not the owner: an owner bypasses the very
+    # policies this script exists to audit and would report success regardless.
+    return required_dsn(
+        "ZEUS_DATABASE_URL", role="zeus_app", purpose="RLS audit, read-only"
+    )
 
 
 async def main() -> int:

@@ -23,16 +23,9 @@ import sys
 from pathlib import Path
 from urllib.parse import quote
 
-ENV_FILE = Path(__file__).resolve().parent.parent / ".env.production.local"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-
-def load(name: str) -> str:
-    for line in ENV_FILE.read_text().splitlines():
-        if line.startswith(f"{name}="):
-            return line.split("=", 1)[1].strip()
-    print(f"{name} not found in {ENV_FILE.name}")
-    sys.exit(1)
-
+from _dsn import confirm_production, required_dsn  # noqa: E402
 
 # Schemas the runtime role needs. DDL is deliberately excluded: the service can
 # read and write rows but cannot alter the shape of the database.
@@ -56,7 +49,18 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA platform, contract_compliance
 async def main() -> int:
     import asyncpg
 
-    admin_dsn = load("ZEUS_MIGRATE_URL")
+    admin_dsn = required_dsn(
+        "ZEUS_MIGRATE_URL",
+        role="owner",
+        purpose="provision the zeus_app runtime role",
+    )
+    # Rotating the password invalidates whatever the running service is using
+    # until the new value is deployed, so this is not a question to skip.
+    confirm_production(
+        admin_dsn,
+        action="create or rotate the zeus_app role password",
+        assume_yes="--yes" in sys.argv,
+    )
     password = secrets.token_urlsafe(32)
 
     conn = await asyncpg.connect(admin_dsn, timeout=30)

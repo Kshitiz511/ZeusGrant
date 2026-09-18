@@ -28,6 +28,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = ROOT / ".env.production.local"
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _dsn import announce, confirm_production  # noqa: E402
+
 
 def _load_env() -> None:
     for line in ENV_FILE.read_text().splitlines():
@@ -55,6 +59,18 @@ async def main() -> int:
     from zeus_platform_core.services.auth_service import TRIAL_PLANS
 
     dry_run = "--dry-run" in sys.argv
+    announce(
+        os.environ["ZEUS_DATABASE_URL"],
+        role="runtime",
+        purpose="backfill trial subscriptions" + (" (dry run)" if dry_run else ""),
+    )
+    if not dry_run:
+        confirm_production(
+            os.environ["ZEUS_DATABASE_URL"],
+            action="create trial subscriptions for every tenant",
+            assume_yes="--yes" in sys.argv,
+        )
+
     container = Container()
     db = container.db
     await db.connect()
