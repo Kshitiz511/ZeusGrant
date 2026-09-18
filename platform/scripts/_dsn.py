@@ -48,9 +48,21 @@ def is_local(dsn: str) -> bool:
 
 def production_dsn() -> str | None:
     """The hosted DSN from the environment or the untracked env file."""
-    dsn = os.environ.get("ZEUS_MIGRATE_URL")
-    if dsn:
-        return dsn
+    return env_dsn() or file_dsn()
+
+
+def env_dsn() -> str | None:
+    """A DSN exported into the environment, if any.
+
+    This wins over everything else. Someone who exported a DSN meant it, and
+    CI sets it to point at its own ephemeral Postgres. It is still announced
+    and still locality-checked, so exporting a production URL can make a write
+    intentional but never silent.
+    """
+    return os.environ.get("ZEUS_MIGRATE_URL") or None
+
+
+def file_dsn() -> str | None:
     if not ENV_FILE.exists():
         return None
     for line in ENV_FILE.read_text().splitlines():
@@ -62,22 +74,30 @@ def production_dsn() -> str | None:
 def resolve_dsn(*, production: bool, local_default: str = LOCAL_DSN) -> str:
     """Pick a target and announce it.
 
+    Order: an exported ``ZEUS_MIGRATE_URL``, then ``--production`` reading the
+    env file, then local.
+
     Printed to **stderr** deliberately: these scripts are routinely piped
     through ``tail`` or ``grep``, and a banner on stdout is exactly the banner
     that got scrolled away when 0018 went to production by accident.
     """
-    if production:
-        dsn = production_dsn()
-        if not dsn:
-            sys.exit(
-                "--production was given but no ZEUS_MIGRATE_URL is set, "
-                f"and {ENV_FILE.name} does not define one."
-            )
-    else:
-        dsn = local_default
+    dsn = env_dsn()
+    source = "ZEUS_MIGRATE_URL"
+    if dsn is None:
+        if production:
+            dsn = file_dsn()
+            source = ENV_FILE.name
+            if not dsn:
+                sys.exit(
+                    "--production was given but no ZEUS_MIGRATE_URL is set, "
+                    f"and {ENV_FILE.name} does not define one."
+                )
+        else:
+            dsn = local_default
+            source = "default"
 
     label = "PRODUCTION" if not is_local(dsn) else "local"
-    print(f"target: {label}  {host_of(dsn)}", file=sys.stderr)
+    print(f"target: {label}  {host_of(dsn)}  (from {source})", file=sys.stderr)
     return dsn
 
 
