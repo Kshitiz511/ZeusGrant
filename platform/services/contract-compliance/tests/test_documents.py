@@ -11,9 +11,12 @@ import zipfile
 
 import pytest
 from zeus_contract_compliance.documents import (
+    CHARS_PER_PAGE,
     DocumentFormat,
     DocumentParseError,
     UnsupportedDocumentError,
+    count_pages,
+    estimate_pages,
     extract_document,
     normalize_text,
     safe_filename,
@@ -21,7 +24,12 @@ from zeus_contract_compliance.documents import (
 )
 
 
-def _docx_bytes(paragraphs: list[str], table: list[list[str]] | None = None) -> bytes:
+def _docx_bytes(
+    paragraphs: list[str],
+    table: list[list[str]] | None = None,
+    *,
+    page_breaks: int = 0,
+) -> bytes:
     import docx
 
     document = docx.Document()
@@ -32,19 +40,74 @@ def _docx_bytes(paragraphs: list[str], table: list[list[str]] | None = None) -> 
         for r, row in enumerate(table):
             for c, cell in enumerate(row):
                 t.cell(r, c).text = cell
+    for _ in range(page_breaks):
+        document.add_page_break()
     buf = io.BytesIO()
     document.save(buf)
     return buf.getvalue()
 
 
 def _pdf_bytes(text: str) -> bytes:
-    from pypdf import PdfWriter
+    """A real PDF whose pages contain extractable text.
 
-    writer = PdfWriter()
-    writer.add_blank_page(width=200, height=200)
-    buf = io.BytesIO()
-    writer.write(buf)
-    return buf.getvalue()
+    ``PdfWriter.add_blank_page`` produces pages with no text at all, which
+    ``extract_document`` rejects as needing OCR -- so it could never exercise
+    extraction or the page count. Writing the file directly keeps the fixture
+    honest without adding a rendering dependency; pypdf parses it exactly as it
+    parses any other PDF.
+
+    ``text`` is placed on a single page. Use :func:`_pdf_pages` for more.
+    """
+    return _pdf_pages([text])
+
+
+def _pdf_pages(pages: list[str]) -> bytes:
+    objs: list[bytes] = []
+
+    def add(body: bytes) -> int:
+        objs.append(body)
+        return len(objs)
+
+    font = add(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    kids: list[int] = []
+    contents: list[tuple[int, int]] = []
+    for body in pages:
+        # Parentheses and backslashes delimit PDF strings and would corrupt the
+        # object if passed through unescaped.
+        escaped = body.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
+        stream = f"BT /F1 12 Tf 72 720 Td ({escaped}) Tj ET".encode()
+        cid = add(b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream))
+        pid = add(b"")  # placeholder: the parent id is not known yet
+        kids.append(pid)
+        contents.append((pid, cid))
+
+    pages_id = add(
+        b"<< /Type /Pages /Count %d /Kids [%s] >>"
+        % (len(pages), b" ".join(b"%d 0 R" % k for k in kids))
+    )
+    for pid, cid in contents:
+        objs[pid - 1] = (
+            b"<< /Type /Page /Parent %d 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>"
+            % (pages_id, font, cid)
+        )
+    root = add(b"<< /Type /Catalog /Pages %d 0 R >>" % pages_id)
+
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for n, obj in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n%s\nendobj\n" % (n, obj)
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    for off in offsets[1:]:
+        out += b"%010d 00000 n \n" % off
+    out += b"trailer\n<< /Size %d /Root %d 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (
+        len(objs) + 1,
+        root,
+        xref,
+    )
+    return bytes(out)
 
 
 # --- sniffing ---------------------------------------------------------------
@@ -126,6 +189,104 @@ def test_extraction_is_truncated_at_the_ceiling():
     result = extract_document(raw, filename="huge.txt")
     assert result.truncated is True
     assert len(result.text) == MAX_EXTRACTED_CHARS
+
+
+# --- the page rule (DEC-11) -------------------------------------------------
+#
+# Customers are billed per page, so these tests are the written form of the
+# rule: a PDF page is a page, a DOCX page is a page where the author said so,
+# and everything else is ceil(chars / 3000).
+
+
+def test_pdf_pages_are_counted_not_estimated():
+    doc = extract_document(_pdf_pages(["alpha", "beta", "gamma"]), filename="c.pdf")
+    assert doc.pages == 3
+    assert doc.page_basis == "counted"
+
+
+def test_a_dense_pdf_is_billed_for_its_real_pages():
+    """A 3-page contract is 3 pages however tightly it is set.
+
+    Taking max(counted, estimate) for every format billed this document as 14
+    pages, because 40k characters divided by 3000 says 14. The PDF stores the
+    truth and the estimate must never override it.
+    """
+    dense = " ".join(f"clause{n}" for n in range(1500))  # ~13k chars per page
+    doc = extract_document(_pdf_pages([dense, dense, dense]), filename="c.pdf")
+    assert len(doc.text) > 10 * CHARS_PER_PAGE
+    assert doc.pages == 3
+    assert doc.page_basis == "counted"
+
+
+def test_a_sparse_pdf_is_not_discounted_below_its_page_count():
+    """Three nearly-empty pages are still three pages, not one."""
+    doc = extract_document(_pdf_pages(["a", "b", "c"]), filename="c.pdf")
+    assert doc.pages == 3
+
+
+def test_docx_page_breaks_are_counted():
+    data = _docx_bytes(["short"], page_breaks=3)
+    doc = extract_document(data, filename="c.docx")
+    assert doc.pages == 4  # three breaks means four pages
+    assert doc.page_basis == "counted"
+
+
+def test_docx_without_breaks_falls_back_to_the_estimate():
+    """Word paginates invisibly, so most real documents have no breaks at all.
+
+    Counting breaks alone would bill this as a single page.
+    """
+    data = _docx_bytes(["Obligation clause text. " * 400])  # ~9.6k chars
+    doc = extract_document(data, filename="c.docx")
+    assert doc.pages == 4
+    assert doc.page_basis == "estimated"
+
+
+def test_docx_break_count_does_not_undercut_the_estimate():
+    """One manual break in a 40-page report does not make it two pages."""
+    data = _docx_bytes(["Obligation clause text. " * 400], page_breaks=1)
+    doc = extract_document(data, filename="c.docx")
+    assert doc.pages == 4
+    assert doc.page_basis == "estimated"
+
+
+def test_plain_text_is_always_an_estimate():
+    doc = extract_document(b"x" * (CHARS_PER_PAGE + 1), filename="c.txt")
+    assert doc.pages == 2
+    assert doc.page_basis == "estimated"
+
+
+@pytest.mark.parametrize(
+    ("chars", "expected"),
+    [
+        (1, 1),  # never zero: any document is at least one page
+        (CHARS_PER_PAGE - 1, 1),
+        (CHARS_PER_PAGE, 1),  # exactly full is still one page
+        (CHARS_PER_PAGE + 1, 2),  # one character over rolls to the next
+        (CHARS_PER_PAGE * 3, 3),
+    ],
+)
+def test_estimate_rounds_up_at_the_boundary(chars: int, expected: int):
+    assert estimate_pages("x" * chars) == expected
+
+
+def test_estimate_never_returns_zero_for_empty_text():
+    """Defensive: extraction rejects empty documents before this is reached,
+    but a zero would silently make a document free."""
+    assert estimate_pages("") == 1
+
+
+def test_an_authoritative_count_of_zero_still_bills_one_page():
+    assert count_pages("x", counted=0, authoritative=True) == (1, "counted")
+
+
+def test_truncated_pdfs_bill_only_the_pages_actually_read():
+    """Pages past the cap are neither extracted nor analysed, so charging for
+    them would be charging for work deliberately not done."""
+    from zeus_contract_compliance.documents import MAX_PDF_PAGES
+
+    doc = extract_document(_pdf_pages(["clause text"] * (MAX_PDF_PAGES + 10)), filename="c.pdf")
+    assert doc.pages == MAX_PDF_PAGES
 
 
 # --- normalization ----------------------------------------------------------

@@ -27,6 +27,36 @@ from enum import StrEnum
 MAX_EXTRACTED_CHARS = 400_000
 MAX_PDF_PAGES = 500
 
+# --- what counts as a page --------------------------------------------------
+#
+# Customers are billed against this number, so the rule is written down rather
+# than left to whatever the parser happened to return (DEC-11):
+#
+#   * **PDF** -- a page is a page. The format stores them, so we count them.
+#   * **DOCX** -- a page is a page *where the document says so*. Word has no
+#     stored page count; it paginates at render time against the installed
+#     fonts, paper size and printer driver, so the same file is legitimately 11
+#     pages on one machine and 12 on another. python-docx cannot render. What
+#     we can read is where the author forced a break, so explicit page and
+#     section breaks are counted, plus one for the document itself.
+#   * **Anything else, and DOCX with no explicit breaks** -- ``ceil(chars /
+#     CHARS_PER_PAGE)``.
+#
+# The fallback matters more than it looks: most Word documents contain no
+# manual breaks at all, because Word flows text automatically. Counting breaks
+# alone would bill a 40-page report as one page. So for DOCX we take whichever
+# of the break count and the character estimate is larger -- a document with a
+# single manual break on page 30 is not a two-page document.
+#
+# That "larger of the two" rule applies to DOCX only. A PDF's page count is the
+# truth, and the estimate must never override it: applied to PDFs it billed a
+# dense but genuinely 3-page contract as 14 pages.
+#
+# CHARS_PER_PAGE is deliberately a round 3000: roughly 500 words of dense
+# contract prose at 12pt on US Letter with normal margins. It is an estimate
+# and is named as one wherever it is shown to a customer.
+CHARS_PER_PAGE = 3_000
+
 
 class DocumentFormat(StrEnum):
     pdf = "pdf"
@@ -50,6 +80,12 @@ class ExtractedDocument:
     checksum: str
     byte_size: int
     truncated: bool
+    #: Billable pages. Never below 1 for a document with any text at all.
+    pages: int
+    #: How ``pages`` was arrived at -- ``"counted"`` when the format told us,
+    #: ``"estimated"`` when it was derived from length. Shown to the customer
+    #: so an invoice line can be explained rather than merely asserted.
+    page_basis: str
 
 
 _CONTENT_TYPES: dict[DocumentFormat, str] = {
@@ -131,12 +167,18 @@ def extract_document(data: bytes, *, filename: str = "") -> ExtractedDocument:
 
     fmt = sniff_format(data, filename=filename)
 
+    #: ``counted`` is the number the format itself reports, or None when it
+    #: cannot tell us. Kept separate from the estimate so the two are never
+    #: silently interchangeable on an invoice.
+    counted: int | None
+    authoritative = False
     if fmt is DocumentFormat.pdf:
-        raw = _extract_pdf(data)
+        raw, counted = _extract_pdf(data)
+        authoritative = True  # the file stores its own page count
     elif fmt is DocumentFormat.docx:
-        raw = _extract_docx(data)
+        raw, counted = _extract_docx(data)
     else:
-        raw = data.decode("utf-8", errors="replace")
+        raw, counted = data.decode("utf-8", errors="replace"), None
 
     text = normalize_text(raw)
     truncated = len(text) > MAX_EXTRACTED_CHARS
@@ -148,6 +190,8 @@ def extract_document(data: bytes, *, filename: str = "") -> ExtractedDocument:
             "No readable text found. Scanned or image-only documents need OCR before upload."
         )
 
+    pages, basis = count_pages(text, counted=counted, authoritative=authoritative)
+
     return ExtractedDocument(
         text=text,
         fmt=fmt,
@@ -155,10 +199,50 @@ def extract_document(data: bytes, *, filename: str = "") -> ExtractedDocument:
         checksum=hashlib.sha256(data).hexdigest(),
         byte_size=len(data),
         truncated=truncated,
+        pages=pages,
+        page_basis=basis,
     )
 
 
-def _extract_pdf(data: bytes) -> str:
+def estimate_pages(text: str) -> int:
+    """``ceil(chars / CHARS_PER_PAGE)``, never below 1.
+
+    Used for plain text, and for DOCX where the author inserted no breaks.
+    """
+    return max(1, -(-len(text) // CHARS_PER_PAGE))
+
+
+def count_pages(text: str, *, counted: int | None, authoritative: bool = False) -> tuple[int, str]:
+    """Resolve the billable page count and say how it was reached.
+
+    ``counted`` is what the format reported, or None. ``authoritative`` says
+    whether that number is the truth (a PDF stores its pages) or a heuristic (a
+    DOCX break count is a floor, since Word paginates the rest invisibly).
+
+    The distinction is not cosmetic. Taking ``max(counted, estimate)``
+    unconditionally billed a dense but genuinely 3-page PDF as 14 pages,
+    because 40k characters of tightly-set text divided by 3000 says 14. For a
+    PDF the estimate is simply wrong and must never win; for a DOCX it is the
+    better of two imperfect numbers, because a 40-page report containing one
+    manual break is not a two-page document.
+    """
+    estimate = estimate_pages(text)
+    if counted is None:
+        return estimate, "estimated"
+    if authoritative:
+        return max(1, counted), "counted"
+    if counted >= estimate:
+        return max(1, counted), "counted"
+    return estimate, "estimated"
+
+
+def _extract_pdf(data: bytes) -> tuple[str, int]:
+    """Return the text and the number of pages actually read.
+
+    Pages past ``MAX_PDF_PAGES`` are neither extracted nor analysed, so they
+    are not billed either -- charging for work deliberately not done would be
+    indefensible, and the truncation is surfaced separately.
+    """
     try:
         from pypdf import PdfReader
     except ImportError as exc:  # pragma: no cover - dependency is declared
@@ -177,14 +261,20 @@ def _extract_pdf(data: bytes) -> str:
                 ) from exc
 
         pages = reader.pages[:MAX_PDF_PAGES]
-        return "\n\n".join((page.extract_text() or "") for page in pages)
+        return "\n\n".join((page.extract_text() or "") for page in pages), len(pages)
     except DocumentParseError:
         raise
     except Exception as exc:
         raise DocumentParseError("Could not read this PDF. The file may be corrupt.") from exc
 
 
-def _extract_docx(data: bytes) -> str:
+def _extract_docx(data: bytes) -> tuple[str, int | None]:
+    """Return the text and the authored page count, or None if unknowable.
+
+    See the page rule above: Word stores no page count, so the best available
+    signal is where the author forced a break. A document with none tells us
+    nothing, and returning ``None`` is how we say so instead of returning 1.
+    """
     try:
         import docx
     except ImportError as exc:  # pragma: no cover - dependency is declared
@@ -202,7 +292,34 @@ def _extract_docx(data: bytes) -> str:
             cells = [cell.text.strip() for cell in row.cells]
             if any(cells):
                 parts.append(" | ".join(cells))
-    return "\n".join(parts)
+    return "\n".join(parts), _docx_break_pages(document)
+
+
+def _docx_break_pages(document: object) -> int | None:
+    """Pages implied by explicit breaks, or None when the author inserted none.
+
+    Counts ``<w:br w:type="page"/>`` and ``<w:lastRenderedPageBreak/>``. The
+    latter is Word's own record of where it broke the page the last time it
+    rendered the file, which is the closest thing to ground truth a non-
+    rendering parser can get -- but it is absent from documents produced
+    programmatically, hence the fallback.
+    """
+    try:
+        body = document.element.body  # type: ignore[attr-defined]
+        xml = body.xml
+    except Exception:  # pragma: no cover - defensive; any shape change
+        return None
+
+    rendered = xml.count("<w:lastRenderedPageBreak/>")
+    if rendered:
+        return rendered + 1
+
+    manual = len(_DOCX_PAGE_BREAK.findall(xml))
+    return manual + 1 if manual else None
+
+
+#: Matches a page break regardless of attribute order or namespace prefix.
+_DOCX_PAGE_BREAK = re.compile(r"<w:br[^>]*w:type=\"page\"", re.IGNORECASE)
 
 
 _WS_RUN = re.compile(r"[ \t\u00a0]+")

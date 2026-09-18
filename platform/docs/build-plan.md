@@ -223,7 +223,23 @@ The Ads constraint survives intact: unverifiable claims risk disapproval, so bef
 Each phase ends in a deployable state with migrations applied, tests passing, and production verified. No phase leaves a half-built feature behind a flag unless the flag is explicitly part of that phase's exit criteria.
 
 **DEC-10 — Every new limit is nullable-means-unlimited.**
-Consistent with the existing `plan_limits` convention. A missing row means unlimited, not zero. This must be asserted in tests, because the opposite default would lock out every existing tenant on deploy.
+Consistent with the existing `plan_limits` convention. A missing row means unlimited, not zero. This must be asserted in tests, because the opposite default would lock out every existing tenant on deploy. *Violated in Grant Intelligence from the start — see D22, closed Phase 7.*
+
+**DEC-11 — A page is what the customer would call a page. (Answers Q4.)**
+Decided by the owner, 2026-09-18, and implemented in `documents.py`:
+
+| Upload | Page count |
+|---|---|
+| PDF | The pages in the file. The format stores them; we count them. |
+| DOCX | The pages the author marked — `lastRenderedPageBreak` if Word recorded one, otherwise manual breaks, plus one. |
+| Anything else, or DOCX with no breaks | `ceil(chars / 3000)` |
+
+Two asymmetries are deliberate and were each found by a test rather than by reasoning:
+
+* **A PDF's count is the truth and the estimate must never override it.** Taking the larger of count and estimate — which is right for DOCX — billed a dense but genuinely 3-page contract as **14 pages**, because 40k tightly-set characters divided by 3000 says 14.
+* **A DOCX's count is a floor, not the truth.** Word stores no page count; it paginates at render time against the installed fonts, paper size and printer driver, so the same file is honestly 11 pages on one machine and 12 on another. python-docx cannot render. Most real documents contain no manual breaks at all, so counting breaks alone would bill a 40-page report as **one page**. Hence: larger of the break count and the estimate.
+
+Pages beyond `MAX_PDF_PAGES` are not extracted, not analysed, and not billed. `ExtractedDocument` carries `page_basis` (`"counted"` / `"estimated"`) so an invoice line can be explained to a customer rather than merely asserted. 3000 chars ≈ 500 words of dense contract prose at 12pt on US Letter; it is an estimate and is named as one wherever a customer sees it.
 
 ---
 
@@ -699,10 +715,14 @@ Reads cross module boundaries, which no other caller may do: each service's `Job
 | `pages_per_month` | Total pages | Ingestion |
 | `storage_mb` | Stored bytes | Upload |
 
-### 10.2 Page counting — must be built
-**There is no page concept anywhere in the codebase today.** PDFs give a page count via `pypdf`. DOCX does not have pages in any meaningful sense until rendered. Plain text has none.
+### 10.2 Page counting — **DONE (counting); storage outstanding**
+**There was no page concept anywhere in the codebase.** PDFs give a page count via `pypdf`. DOCX does not have pages in any meaningful sense until rendered. Plain text has none.
 
-**Decision required (§13):** define a "page" as a normalized unit — e.g. PDF actual pages; for DOCX and text, `ceil(chars / 3000)`. Whatever is chosen must be written down and shown to the customer, because they will be billed against it. Store the count on the document row at ingestion.
+**Decided — see DEC-11**, which answers Q4 and is written down there in the form a customer could be shown. `extract_document()` now returns `pages` and `page_basis`; 15 tests in `test_documents.py` pin the rule, including the two asymmetries. Verified by breaking the rule in both directions: forcing the estimate over a PDF's real count fails 2 tests, and letting a DOCX break count undercut the estimate fails 1.
+
+The PDF test fixture was rewritten as part of this. It previously called `PdfWriter.add_blank_page`, which produces pages with **no text at all** — so every "PDF extraction" test was really asserting that an empty document is rejected, and could not have exercised extraction or a page count. It now writes a real PDF with a text content stream, by hand, rather than adding a rendering dependency for a fixture.
+
+**Still outstanding:** store `pages` on the document row at ingestion, and enforce `pages_per_document` / `pages_per_month` against it.
 
 ### 10.3 Enforcement (per DEC-5)
 Pre-flight against remaining budget, post-flight recording actual. The token overshoot is bounded by one operation and is a documented property.
@@ -812,7 +832,7 @@ Required:
 | ~~Q1~~ | ~~Landing page proof points.~~ **Answered 2026-09-16:** invent illustrative figures for now, swap for the client's real data once the project is won. Implemented under the revised DEC-7 — single source, tagged, visibly marked, build refuses to ship them to production by default. Named customers, logos and compliance certifications remain forbidden. | ~~Phase 11~~ |
 | ~~Q2~~ | ~~Legacy scope.~~ **Answered 2026-09-16:** all modules in scope. Phase 9 split into 9a–9f, ordered cheapest-and-most-visible first, with the AI-heavy modules deferred until metering (Phase 2) and guardrails (Phase 7) exist. | ~~Phase 9~~ |
 | ~~Q3~~ | ~~Grant limit values.~~ **Answered 2026-09-16 by assumption:** seeded at the values the hardcoded fallbacks already used, so no existing tenant's behaviour changed. Those fallbacks are **3 scans and 25 matches** — the 4 and 50 previously recorded here were wrong. Seeded in migration 0014 as scans 3/10/30/100 and matches 25/100/unlimited/unlimited. Revisit when pricing is set commercially. | ~~Phase 1~~ |
-| Q4 | Page definition — how is a page counted for DOCX and plain text? Proposal: `ceil(chars / 3000)`. | Phase 7 |
+| Q4 | Page definition — how is a page counted for DOCX and plain text? Proposal: `ceil(chars / 3000)`. | **ANSWERED 2026-09-18 — DEC-11.** PDF page = a page; DOCX page = an authored page break; otherwise `ceil(chars / 3000)`. |
 | ~~Q5~~ | ~~Suspension semantics — hard lockout or read-only?~~ **Answered 2026-09-16:** hard lockout for *new* work, and queued jobs run to completion. Implemented in Phase 5a — see §8.1. The drain half needed no new machinery: the worker authenticates by shared secret and never consults entitlements, so it was already the behaviour. What it needed was a test that fails if anyone changes it by accident. | ~~Phase 5~~ |
 | Q6 | Retry semantics — does an admin retry reset `attempts` to 0 or continue the count? | **Answered (Phase 6): reset.** An operator pressing retry is asserting the cause is fixed. Continuing the count means an exhausted job is retried once, immediately fails as exhausted again, and the button looks broken. The history is not lost — the prior count and error are kept in `last_error`, and the action is audited. |
 | Q7 | Enterprise plans have no limit rows, so unlimited. Intended? | Phase 7 |
