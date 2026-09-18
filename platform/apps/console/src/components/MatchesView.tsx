@@ -53,7 +53,8 @@ export function MatchesView({ onNavigate }: { onNavigate: (key: string) => void 
     scan.mutate(undefined, { onSuccess: (r) => setJobId(r.job_id) });
 
   const scans = summary?.scans;
-  const outOfScans = !!scans && scans.remaining <= 0;
+  // null remaining means unlimited, not none left.
+  const outOfScans = !!scans && scans.remaining !== null && scans.remaining <= 0;
   const blocked = readBlock(scan.error);
 
   const matches = data?.matches ?? [];
@@ -76,8 +77,14 @@ export function MatchesView({ onNavigate }: { onNavigate: (key: string) => void 
         <StatCard
           icon={Radar}
           label="Scans left"
-          value={scans ? String(scans.remaining) : "—"}
-          hint={scans ? `${scans.used} of ${scans.limit} used this month` : "on your plan"}
+          value={scans ? (scans.remaining === null ? "Unlimited" : String(scans.remaining)) : "—"}
+          hint={
+            scans
+              ? scans.limit === null
+                ? `${scans.used} run this month`
+                : `${scans.used} of ${scans.limit} used this month`
+              : "on your plan"
+          }
         />
       </div>
 

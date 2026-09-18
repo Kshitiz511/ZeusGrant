@@ -29,11 +29,18 @@ MODULE_ID = "grant_intelligence"
 LIMIT_SCANS_PER_MONTH = "scans_per_month"
 LIMIT_MATCHES_VISIBLE = "matches_visible"
 
-#: Used when a plan does not state a limit. Deliberately small rather than
-#: unlimited: a missing limit is a configuration gap, and the safe reading of a
-#: gap is the free tier, not everything.
+#: Used only when the tenant has no active Grant Intelligence entitlement, or
+#: when entitlements cannot be read at all. It is **not** what a plan omitting
+#: the key means: under DEC-10 an absent or NULL limit row is unlimited, which
+#: is exactly how every ``*_enterprise`` plan is configured. Treating a gap as
+#: the free tier gave the most expensive plans the smallest allowance (D22).
 DEFAULT_SCANS_PER_MONTH = 3
 DEFAULT_MATCHES_VISIBLE = 25
+
+#: How many matches to serve when the plan says unlimited. A window still has
+#: to end somewhere -- the alternative is an unbounded query -- but this is a
+#: pagination ceiling, not an entitlement, and it is far above any real page.
+UNLIMITED_MATCHES_WINDOW = 10_000
 
 
 class LimitExceeded(Exception):
@@ -54,7 +61,8 @@ class ScanResult:
     status: str
     queued: bool
     scans_used: int
-    scans_limit: int
+    #: None when the plan states no ceiling.
+    scans_limit: int | None
 
 
 class GrantService:
@@ -129,8 +137,12 @@ class GrantService:
         capped and page 2 quietly serving the rest.
         """
         visible = await self._limit(tenant_id, LIMIT_MATCHES_VISIBLE, DEFAULT_MATCHES_VISIBLE)
+        # A window still has to end somewhere, but an unlimited plan must not
+        # be *reported* as capped at the window -- the UI would say "showing
+        # 312 of 312 (limited)" on a plan that has no limit.
+        window = UNLIMITED_MATCHES_WINDOW if visible is None else visible
 
-        remaining = max(0, visible - offset)
+        remaining = max(0, window - offset)
         effective_limit = min(limit, remaining)
         if effective_limit == 0:
             rows: list[dict[str, Any]] = []
@@ -144,9 +156,9 @@ class GrantService:
             "matches": rows,
             "total": total,
             # Stated plainly so the UI can say "showing 25 of 312" rather than
-            # pretending 25 is all there is.
+            # pretending 25 is all there is. ``None`` means unlimited.
             "visible_limit": visible,
-            "truncated": total > visible,
+            "truncated": visible is not None and total > visible,
             "offset": offset,
         }
 
@@ -165,7 +177,10 @@ class GrantService:
     async def scan_usage(self, tenant_id: str) -> dict[str, Any]:
         used = await self._scans_this_month(tenant_id)
         limit = await self._limit(tenant_id, LIMIT_SCANS_PER_MONTH, DEFAULT_SCANS_PER_MONTH)
-        return {"used": used, "limit": limit, "remaining": max(0, limit - used)}
+        # ``None`` for both means unlimited. Reporting remaining=0 there would
+        # make the UI grey out the button on the plan that paid for it.
+        remaining = None if limit is None else max(0, limit - used)
+        return {"used": used, "limit": limit, "remaining": remaining}
 
     async def request_scan(self, tenant_id: str) -> ScanResult:
         """Queue a rescore for this tenant, subject to the plan's scan limit.
@@ -184,7 +199,7 @@ class GrantService:
 
         used = await self._scans_this_month(tenant_id)
         limit = await self._limit(tenant_id, LIMIT_SCANS_PER_MONTH, DEFAULT_SCANS_PER_MONTH)
-        if used >= limit:
+        if limit is not None and used >= limit:
             raise LimitExceeded(
                 f"You have used all {limit} scans on your plan this month.",
                 limit=limit,
@@ -256,8 +271,13 @@ class GrantService:
         )
         return int((row or {}).get("n") or 0)
 
-    async def _limit(self, tenant_id: str, key: str, default: int) -> int:
-        """Read a numeric limit from the tenant's entitlements."""
+    async def _limit(self, tenant_id: str, key: str, default: int) -> int | None:
+        """Read a numeric limit from the tenant's entitlements.
+
+        ``None`` means unlimited and callers must handle it. Returning the
+        default for it instead -- which this did until D22 -- silently caps an
+        enterprise tenant at the free-tier number.
+        """
         try:
             claims = await self._entitlements.get_claims(tenant_id)
         except Exception:
@@ -265,8 +285,8 @@ class GrantService:
             # failing open to unlimited or closed to zero.
             log.warning("grants.entitlements_unavailable tenant=%s", tenant_id, exc_info=True)
             return default
-        value = claims.limit(MODULE_ID, key)
-        return default if value is None else int(value)
+        value = claims.limit_ceiling(MODULE_ID, key, fallback=default)
+        return None if value is None else int(value)
 
 
 def _next_month_start() -> datetime:

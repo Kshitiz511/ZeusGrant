@@ -192,12 +192,14 @@ export type MatchPage = {
   matches: Match[];
   total: number;
   /** What the plan allows this tenant to see, so the UI can say "25 of 312". */
-  visible_limit: number;
+  visible_limit: number | null;
   truncated: boolean;
   offset: number;
 };
 
-export type ScanUsage = { used: number; limit: number; remaining: number };
+// `limit` and `remaining` are null when the plan states no ceiling, which is
+// how every enterprise plan is configured. Do not coerce them to 0.
+export type ScanUsage = { used: number; limit: number | null; remaining: number | null };
 
 export type MatchSummary = {
   /** Matches still in play, i.e. not dismissed. */
@@ -216,7 +218,7 @@ export type ScanRequest = {
   /** True when this collapsed into a scan already running, so no quota was spent. */
   already_running: boolean;
   scans_used: number;
-  scans_limit: number;
+  scans_limit: number | null;
 };
 
 export type JobState = "queued" | "running" | "succeeded" | "failed" | "cancelled";

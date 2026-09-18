@@ -129,6 +129,23 @@ No harm done: `platform.jobs` held zero rows, nothing deployed called the new fu
 **This is D17 repeating.** D17 put a local-only guard on the e2e scripts after a probe created real users in production. The guard was never extended to the one script whose entire purpose is to change the schema — the most dangerous tool in the repository had the least protection and the shortest command.
 **Fixed.** The default target is local. Production requires `--production` *and* typing the hostname back; `--yes` exists only for CI. The host is printed before anything runs.
 
+### D22 — enterprise plans were billed unlimited and served the free tier — **CLOSED (Phase 7)**
+`GrantService._limit()` ended `return default if value is None else int(value)`. Its comment argued that a missing limit is a configuration gap and the safe reading of a gap is the free tier. That is a reasonable instinct and it was wrong here, because DEC-10 had already given the absence a meaning: **unlimited**. The seed data relies on it — every one of the five `*_enterprise` plans ships with **zero** `plan_limits` rows, verified against the live catalogue.
+
+So the most expensive plans on the price list resolved to `DEFAULT_SCANS_PER_MONTH = 3` and `DEFAULT_MATCHES_VISIBLE = 25`: an enterprise tenant got three scans a month, saw 25 of their 312 matches, and was shown the *upgrade* banner, because `truncated` was computed against the free-tier number. Nothing errored. Nothing logged. The customer simply received less than they paid for, and the only symptom would have been a support ticket.
+
+Contract Compliance read the identical condition correctly — `if limit is None: return` — from the same claims. **Two modules, the same data, opposite answers, neither aware of the other.** That is the part worth remembering: the defect was not a typo, it was two people independently guessing what an absent row meant.
+
+The root cause is that `EntitlementClaims.limit()` returns `None` for two opposite situations — "the plan says unlimited" and "this tenant has no entitlement for this module" — so no caller reading it can distinguish them, and every caller must guess.
+
+**Fixed.** `EntitlementClaims.limit_ceiling(module_id, key, *, fallback)` makes the three answers distinct: `None` unlimited, `int` a ceiling, `fallback` only when the module entitlement is missing or inactive. `_limit()` returns `int | None`; `scan_usage`, `request_scan` and `list_matches` handle unlimited. `visible_limit`/`limit`/`remaining` are now nullable across the API and the console renders "Unlimited" rather than coercing to `0` and greying out the button. An unlimited match window still pages to `UNLIMITED_MATCHES_WINDOW = 10_000` — unlimited is an entitlement, not permission to run an unbounded query.
+
+Fallback is kept for the entitlement-missing case rather than raising: a limit check is the wrong place to discover an authorisation problem — the route's entitlement guard is — but if that guard is ever bypassed, the free-tier number is the safe thing to be left holding.
+
+`tests/test_grant_limits.py` (19 tests) pins all three cases on both scans and matches. Verified by restoring the old semantics: **7 fail**.
+
+**Answers §10.5's open question.** Zero limit rows on enterprise *was* intended. The bug was the reader, not the data.
+
 ### D13 — No admin authorization tests — **CLOSED (Phase 4, `0748d2c`)**
 Zero tests assert that a non-admin gets 403 from admin routes, or that `platform_admin` cannot be self-granted via token exchange.
 **Fixed in Phase 4.** `tests/test_platform_admin.py` (25 tests) covers both, parametrised over every admin route, plus a structural test asserting the parametrised list matches the router's registered routes so a new endpoint cannot escape it. Verified by breaking both guarantees and watching the tests fail.
@@ -695,12 +712,12 @@ Needs a `usage_counters` read path efficient enough for the request path — a m
 ### 10.4 Warnings before walls
 At 80% of a limit, surface a warning in the UI and optionally email. Hitting a hard 402 with no warning is the single most common cause of angry support tickets.
 
-### 10.5 Enterprise plans
-The five `*_enterprise` plans have **no limit rows at all**, which under DEC-10 means unlimited. Confirm that is intended.
+### 10.5 Enterprise plans — **DONE**
+The five `*_enterprise` plans have **no limit rows at all**, which under DEC-10 means unlimited. **Confirmed intended.** The code disagreed with itself about what that meant — see **D22**, closed. Grant Intelligence read the absence as the free tier and handed enterprise customers three scans a month; Contract Compliance read it as unlimited. Both now resolve limits through `EntitlementClaims.limit_ceiling()`, which cannot express the two as the same value.
 
 ### Exit criteria
 - [ ] Every new key enforced with a test proving both allow and deny
-- [ ] Missing limit row → unlimited, proven by test (DEC-10)
+- [x] Missing limit row → unlimited, proven by test (DEC-10) — `tests/test_grant_limits.py`, 19 tests, 7 fail when the old semantics are restored
 - [ ] Counters do not scan `ai_usage` per request
 - [ ] 80% warning fires
 - [ ] Admin can override per tenant (Phase 5 mechanism)

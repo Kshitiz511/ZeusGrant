@@ -97,3 +97,35 @@ class EntitlementClaims(BaseModel):
         if ent is None:
             return None
         return ent.limits.get(key)
+
+    def limit_ceiling(self, module_id: str, key: str, *, fallback: int) -> int | None:
+        """Resolve a numeric limit into the three answers a caller can act on.
+
+        ``None`` means unlimited. An integer is a ceiling. ``fallback`` is used
+        only when the tenant has no active entitlement for the module at all.
+
+        This exists because ``limit()`` returns ``None`` for two situations that
+        are opposites, and a caller reading it directly has no way to tell them
+        apart:
+
+        * the plan states the key with a NULL value, or omits it, which under
+          DEC-10 means **unlimited**;
+        * the tenant has no entitlement for this module, which means they
+          should not be here at all.
+
+        Collapsing those is not academic. Every ``*_enterprise`` plan ships with
+        **zero** limit rows, precisely because DEC-10 makes that mean unlimited.
+        A caller that reads a missing row as "be safe, use the free-tier
+        default" hands the most expensive plan on the price list the smallest
+        allowance on it -- see defect D22.
+
+        The fallback is kept for the entitlement-missing case rather than
+        raising, because a limit check is not the right place to discover an
+        authorisation problem; the route's entitlement guard is. If that guard
+        is ever bypassed, the free-tier number is the safe thing to be left
+        holding.
+        """
+        ent = self.modules.get(module_id)
+        if ent is None or not ent.is_active:
+            return fallback
+        return ent.limits.get(key)

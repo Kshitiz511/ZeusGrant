@@ -79,10 +79,18 @@ ContainerDep = Annotated[Container, Depends(_container)]
 
 
 async def _enforce_contract_limit(container: Container, tenant_id: str) -> None:
+    """Refuse a new contract once the plan's ceiling is reached.
+
+    Under DEC-10 an absent limit key means unlimited, which is how every
+    ``*_enterprise`` plan is seeded -- with no limit rows at all. Grant
+    Intelligence read the same absence as the free-tier default until D22, so
+    the two modules disagreed about what the same data meant. This side was
+    right; keep it that way.
+    """
     claims = await container.security.claims_for(tenant_id)
     ent = (claims.get("modules") or {}).get(MODULE_ID) or {}
     limit = (ent.get("limits") or {}).get("contracts_max")
-    if limit is None:  # unlimited or unknown
+    if limit is None:  # unlimited
         return
     used = await container.contracts.count_for_tenant(tenant_id)
     if used >= int(limit):
