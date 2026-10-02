@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Loader2, ShieldCheck } from "lucide-react";
 import { ActivityView } from "@/components/ActivityView";
+import { AdminPanel } from "@/components/admin/AdminPanel";
 import { AppShell } from "@/components/AppShell";
 import { BillingView } from "@/components/BillingView";
 import { ContractDetail } from "@/components/ContractDetail";
@@ -115,6 +116,13 @@ function Authed({ view, setView }: { view: View; setView: (v: View) => void }) {
   const { data: contracts } = useContracts();
 
   const navigate = (key: string) => setView({ kind: "route", key });
+
+  // The operator console is not a page inside a workspace -- it spans every
+  // tenant -- so it renders outside AppShell rather than inside it. Putting it
+  // in the tenant sidebar would imply its contents were scoped to this tenant.
+  if (view.kind === "route" && view.key === "/admin") {
+    return <AdminPanel onExit={() => navigate("/compliance")} />;
+  }
 
   // The default landing route is Contract Compliance, which is wrong for a
   // tenant who only bought Grant Intelligence. Once entitlements arrive, move

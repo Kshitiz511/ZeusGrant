@@ -1,6 +1,16 @@
 import type { ReactNode } from "react";
-import { BarChart3, ChevronRight, CreditCard, LogOut, Lock, Settings, Users } from "lucide-react";
+import {
+  BarChart3,
+  ChevronRight,
+  CreditCard,
+  LogOut,
+  Lock,
+  Settings,
+  ShieldAlert,
+  Users,
+} from "lucide-react";
 import { Logo } from "@/components/brand/Logo";
+import { useIsPlatformAdmin } from "@/lib/admin-hooks";
 import { useAuth } from "@/lib/auth";
 import { useActiveModules, useIsTenantAdmin } from "@/lib/hooks";
 import { MODULES } from "@/lib/modules";
@@ -33,6 +43,9 @@ export function AppShell({
   // mid-session should not leave them with admin nav until they sign out.
   // This only hides links; every route behind them re-checks server-side.
   const { isAdmin } = useIsTenantAdmin();
+  // Distinct from isAdmin above: that is an admin *of this workspace*, this is
+  // an operator of the platform. The two are unrelated grants.
+  const { isPlatformAdmin } = useIsPlatformAdmin();
 
   // Status is checked as well as entitlement. A service with no routes behind
   // it must not produce nav even if a subscription exists for it, or the
@@ -109,6 +122,11 @@ export function AppShell({
             {navButton("/usage", "Usage", BarChart3, active === "/usage")}
             {navButton("/billing", "Plans & Billing", CreditCard, active === "/billing")}
             {navButton("/settings", "Settings", Settings, active === "/settings")}
+            {/* Platform-wide, not tenant-scoped: only operators see it, and
+                the server re-checks every route behind it. Kept visually last
+                so it reads as leaving the workspace rather than a page in it. */}
+            {isPlatformAdmin &&
+              navButton("/admin", "Operator console", ShieldAlert, active === "/admin")}
           </div>
         </nav>
 

@@ -168,14 +168,27 @@ async def exchange_token(
 
 
 @router.get("/me")
-async def my_role(role: MembershipRoleDep, tenant_id: TenantIdDep) -> dict:
+async def my_role(
+    role: MembershipRoleDep,
+    tenant_id: TenantIdDep,
+    session: SessionDep,
+    container: ContainerDep,
+) -> dict:
     """The caller's role in the active workspace.
 
     The console decides which administration screens to show from this. That
     is presentation only -- every route below re-checks server-side, because a
     hidden button is not an access control.
+
+    ``platform_admin`` is read from the database rather than the token for the
+    same reason the token-exchange route rebuilds it: revoking the grant has to
+    take effect on the next request, not whenever the current token expires.
     """
-    return {"tenant_id": tenant_id, "role": role}
+    return {
+        "tenant_id": tenant_id,
+        "role": role,
+        "platform_admin": await container.tenants.is_platform_admin(session.user_id),
+    }
 
 
 @router.get("/members", response_model=list[MemberOut])

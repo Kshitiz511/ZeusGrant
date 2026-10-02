@@ -73,7 +73,7 @@ export class ApiError extends Error {
   }
 }
 
-type TokenGetter = () => string | null;
+export type TokenGetter = () => string | null;
 
 async function request<T>(
   url: string,
@@ -110,6 +110,16 @@ async function request<T>(
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
+
+/**
+ * The same transport, re-exported for the platform-admin client.
+ *
+ * A separate name rather than exporting `request` directly: admin calls are
+ * worth being able to grep for, and sharing the implementation means the
+ * token refresh and error-shaping behaviour cannot drift between the two
+ * surfaces the way a copied helper would.
+ */
+export const adminRequest = request;
 
 function summarizeDetail(raw: unknown): string | null {
   if (!Array.isArray(raw)) return null;
@@ -443,7 +453,11 @@ export const api = {
    * not an access control.
    */
   myRole: (getToken: TokenGetter) =>
-    request<{ tenant_id: string; role: MemberRole }>(`${CORE}/tenancy/me`, {}, getToken),
+    request<{ tenant_id: string; role: MemberRole; platform_admin: boolean }>(
+      `${CORE}/tenancy/me`,
+      {},
+      getToken,
+    ),
 
   listMembers: (getToken: TokenGetter) =>
     request<Member[]>(`${CORE}/tenancy/members`, {}, getToken),

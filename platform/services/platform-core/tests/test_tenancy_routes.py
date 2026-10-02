@@ -39,16 +39,21 @@ class StubAuth:
         return "stub"
 
 
-def _client(role: str | None) -> Iterator[TestClient]:
+def _client(role: str | None, *, platform_admin: bool = False) -> Iterator[TestClient]:
     """An app whose caller holds ``role`` in the active tenant.
 
     ``None`` means "not a member at all", which is the case the 404 branch
-    exists for.
+    exists for. ``platform_admin`` is independent of ``role``: operating the
+    platform and administering one workspace are unrelated grants, and a test
+    that could not separate them would not catch the two being conflated.
     """
     container = Container(db=FakeDatabase(), cache=MemoryCache(), auth=StubAuth())
 
     async def fake_role(*, tenant_id: str, user_id: str) -> str | None:
         return role
+
+    async def fake_platform_admin(user_id: str) -> bool:
+        return platform_admin
 
     async def fake_members(tenant_id: str) -> list[dict]:
         return [
@@ -63,6 +68,7 @@ def _client(role: str | None) -> Iterator[TestClient]:
 
     container.tenants.get_membership_role = fake_role  # type: ignore[method-assign]
     container.tenants.list_members = fake_members  # type: ignore[method-assign]
+    container.tenants.is_platform_admin = fake_platform_admin  # type: ignore[method-assign]
 
     with TestClient(create_app(container)) as client:
         yield client
@@ -148,7 +154,24 @@ def test_role_endpoint_reports_the_callers_rank(member: TestClient) -> None:
     response = member.get("/tenancy/me", headers=AUTH)
 
     assert response.status_code == 200
-    assert response.json() == {"tenant_id": TENANT, "role": "member"}
+    assert response.json() == {
+        "tenant_id": TENANT,
+        "role": "member",
+        "platform_admin": False,
+    }
+
+
+def test_role_endpoint_reports_platform_admin_separately() -> None:
+    """Operating the platform is not the same grant as administering a tenant.
+
+    A plain member of this workspace who also operates the platform must be
+    reported as both. Deriving one from the other would either hide the
+    operator console from an operator or show it to every workspace owner.
+    """
+    for client in _client("member", platform_admin=True):
+        body = client.get("/tenancy/me", headers=AUTH).json()
+
+    assert body == {"tenant_id": TENANT, "role": "member", "platform_admin": True}
 
 
 def test_unauthenticated_callers_are_rejected(admin: TestClient) -> None:
