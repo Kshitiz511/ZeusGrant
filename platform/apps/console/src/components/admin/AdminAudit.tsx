@@ -1,5 +1,6 @@
 import { Empty, Failed, Loading, Panel, when } from "@/components/admin/primitives";
 import { useAdminAudit } from "@/lib/admin-hooks";
+import type { AuditEntryRow } from "@/lib/admin-api";
 
 /**
  * The administrative trail.
@@ -30,27 +31,39 @@ export function AdminAudit() {
           <thead className="border-b border-border text-left text-xs uppercase tracking-wider text-muted-foreground">
             <tr>
               <th className="px-5 py-2 font-semibold">When</th>
+              <th className="px-5 py-2 font-semibold">Who</th>
               <th className="px-5 py-2 font-semibold">Action</th>
               <th className="px-5 py-2 font-semibold">Target</th>
-              <th className="px-5 py-2 font-semibold">Detail</th>
+              <th className="px-5 py-2 font-semibold">Change</th>
             </tr>
           </thead>
           <tbody>
-            {entries.map((e, i) => (
-              <tr key={e.id ?? i} className="border-b border-border/50 last:border-0 align-top">
+            {entries.map((e) => (
+              <tr key={e.id} className="border-b border-border/50 last:border-0 align-top">
                 <td className="whitespace-nowrap px-5 py-2.5 text-xs text-muted-foreground">
                   {when(e.created_at)}
                 </td>
+                <td className="px-5 py-2.5 text-xs text-foreground">
+                  {/* The flat email, not the id. The id is nulled when an
+                      account is deleted, and the email is then the only thing
+                      that still answers who did this. */}
+                  {e.actor_email ?? <span className="text-muted-foreground">unknown</span>}
+                </td>
                 <td className="px-5 py-2.5 font-medium text-foreground">{e.action}</td>
-                <td className="px-5 py-2.5 text-xs text-muted-foreground">{e.target ?? "—"}</td>
                 <td className="px-5 py-2.5 text-xs text-muted-foreground">
-                  {e.detail ? (
-                    <code className="block max-w-md truncate" title={JSON.stringify(e.detail)}>
-                      {JSON.stringify(e.detail)}
-                    </code>
+                  {e.target_type ? (
+                    <>
+                      {e.target_type}
+                      {e.target_id && (
+                        <span className="block font-mono">{e.target_id.slice(0, 8)}</span>
+                      )}
+                    </>
                   ) : (
                     "—"
                   )}
+                </td>
+                <td className="px-5 py-2.5 text-xs">
+                  <Change before={e.before} after={e.after} />
                 </td>
               </tr>
             ))}
@@ -59,4 +72,45 @@ export function AdminAudit() {
       </div>
     </Panel>
   );
+}
+
+/**
+ * The before and after of one action.
+ *
+ * Both arrive as jsonb, which asyncpg hands back as a string rather than a
+ * parsed object, so parsing happens here rather than being assumed.
+ */
+function Change({
+  before,
+  after,
+}: {
+  before: AuditEntryRow["before"];
+  after: AuditEntryRow["after"];
+}) {
+  const b = summarize(before);
+  const a = summarize(after);
+  if (!b && !a) return <span className="text-muted-foreground">—</span>;
+  return (
+    <span className="text-muted-foreground">
+      {b && <span className="line-through opacity-70">{b}</span>}
+      {b && a && <span className="mx-1">→</span>}
+      {a && <span className="text-foreground">{a}</span>}
+    </span>
+  );
+}
+
+function summarize(value: string | Record<string, unknown> | null): string {
+  if (value === null || value === undefined) return "";
+  let obj: unknown = value;
+  if (typeof value === "string") {
+    try {
+      obj = JSON.parse(value);
+    } catch {
+      return value;
+    }
+  }
+  if (!obj || typeof obj !== "object") return String(obj);
+  return Object.entries(obj as Record<string, unknown>)
+    .map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : String(v)}`)
+    .join(", ");
 }

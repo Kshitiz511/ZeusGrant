@@ -117,12 +117,19 @@ export interface AdminSetting {
 }
 
 export interface AuditEntryRow {
-  id?: string;
+  id: string;
   action: string;
-  actor_user_id?: string | null;
-  target?: string | null;
-  created_at?: string;
-  detail?: Record<string, unknown> | null;
+  /** Flat, and deliberately so: the row survives the account being deleted. */
+  actor_email: string | null;
+  actor_user_id: string | null;
+  target_type: string | null;
+  target_id: string | null;
+  /** jsonb. asyncpg hands these back as strings, not parsed objects. */
+  before: string | Record<string, unknown> | null;
+  after: string | Record<string, unknown> | null;
+  ip: string | null;
+  user_agent: string | null;
+  created_at: string;
 }
 
 export const adminApi = {
