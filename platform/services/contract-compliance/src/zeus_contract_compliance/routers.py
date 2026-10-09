@@ -119,6 +119,45 @@ async def _enforce_contract_limit(container: Container, tenant_id: str) -> None:
         )
 
 
+# Share of a limit at which the console starts warning (Phase 7, 10.4).
+WARN_AT = 0.8
+
+
+async def _enforce_ai_budget(container: Container, tenant_id: str) -> None:
+    """Pre-flight AI spend check (DEC-5).
+
+    Token counts are unknown until a call returns, so this refuses only once
+    the month's recorded usage has reached the ceiling. The run that crosses
+    the line completes and is recorded, so the overshoot is bounded by one
+    analysis -- a documented property, not an accident.
+    """
+    limits = await _plan_limits(container, tenant_id)
+    token_cap = _ceiling(limits, "tokens_per_month")
+    cost_cap = _ceiling(limits, "ai_cost_per_month_usd")
+    if token_cap is None and cost_cap is None:
+        return
+    tokens, cost = await container.documents.ai_usage_this_month(tenant_id, MODULE_ID)
+    for key, cap, used in (
+        ("tokens_per_month", token_cap, tokens),
+        ("ai_cost_per_month_usd", cost_cap, cost),
+    ):
+        if cap is not None and used >= cap:
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail={
+                    "error": "limit_exceeded",
+                    "message": (
+                        "This month's AI analysis allowance is used up. It resets on "
+                        "the 1st, or upgrade the Contract Compliance plan to continue."
+                    ),
+                    "limit_key": key,
+                    "limit": cap,
+                    "used": round(used, 2) if isinstance(used, float) else used,
+                    "requested": 0,
+                },
+            )
+
+
 async def _require_contract(container: Container, tenant_id: str, contract_id: str) -> Contract:
     contract = await container.contracts.get(tenant_id, contract_id)
     if contract is None:
@@ -290,6 +329,7 @@ async def upload_document(
         pages_per_document=_ceiling(limits, "pages_per_document"),
         pages_per_month=_ceiling(limits, "pages_per_month"),
         documents_per_month=_ceiling(limits, "documents_per_month"),
+        storage_mb=_ceiling(limits, "storage_mb"),
     )
 
     try:
@@ -578,6 +618,8 @@ async def analyze_contract(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="This contract has no text yet. Upload a document or paste the text first.",
         )
+
+    await _enforce_ai_budget(container, tenant_id)
 
     if async_mode:
         # Keyed on the contract, so a double-clicked button collapses into the

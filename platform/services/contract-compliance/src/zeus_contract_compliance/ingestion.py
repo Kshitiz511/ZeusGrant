@@ -78,6 +78,7 @@ class IngestQuota:
     pages_per_document: int | None = None
     pages_per_month: int | None = None
     documents_per_month: int | None = None
+    storage_mb: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +149,22 @@ class IngestionService:
                     key="documents_per_month",
                     limit=quota.documents_per_month,
                     used=used,
+                )
+
+        # Storage is known from the byte length alone, so like the document
+        # count it is checked before paying for the parse.
+        if quota.storage_mb is not None:
+            used_bytes = await self._documents.storage_bytes(tenant_id)
+            cap = quota.storage_mb * 1024 * 1024
+            if used_bytes + len(data) > cap:
+                used_mb = -(-used_bytes // (1024 * 1024))
+                raise QuotaExceededError(
+                    f"Storage limit reached: {used_mb} of {quota.storage_mb} MB used. "
+                    "Delete documents you no longer need or upgrade the plan.",
+                    key="storage_mb",
+                    limit=quota.storage_mb,
+                    used=used_mb,
+                    requested=-(-len(data) // (1024 * 1024)),
                 )
 
         # Raises UnsupportedDocumentError / DocumentParseError, both 4xx.

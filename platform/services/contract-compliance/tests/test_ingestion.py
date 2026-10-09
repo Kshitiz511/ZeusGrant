@@ -68,7 +68,9 @@ class FakeDocuments:
         docs_used: int = 0,
         duplicate: Document | None = None,
         fail_create: bool = False,
+        bytes_used: int = 0,
     ) -> None:
+        self.bytes_used = bytes_used
         self.pages_used = pages_used
         self.docs_used = docs_used
         self.duplicate = duplicate
@@ -83,6 +85,10 @@ class FakeDocuments:
     async def pages_this_month(self, tenant_id: str) -> int:
         self.calls.append("pages_this_month")
         return self.pages_used
+
+    async def storage_bytes(self, tenant_id: str) -> int:
+        self.calls.append("storage_bytes")
+        return self.bytes_used
 
     async def find_by_checksum(self, tenant_id, contract_id, checksum):
         self.calls.append("find_by_checksum")
@@ -196,6 +202,38 @@ async def test_an_all_none_quota_is_unlimited():
     svc, _, _ = service(docs)
     result = await ingest(svc, text_of_pages(50), quota=IngestQuota())
     assert result.document.pages == 50
+
+
+# --- storage_mb -------------------------------------------------------------
+
+MB = 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_upload_that_would_exceed_storage_is_refused_before_parsing():
+    docs = FakeDocuments(bytes_used=MB - 10)
+    svc, storage, _ = service(docs)
+    with pytest.raises(QuotaExceededError) as err:
+        await ingest(svc, b"x" * 11, quota=IngestQuota(storage_mb=1))
+    assert err.value.key == "storage_mb"
+    assert "create" not in docs.calls
+    assert storage.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_upload_that_exactly_fills_storage_is_accepted():
+    docs = FakeDocuments(bytes_used=MB - 10)
+    svc, _, _ = service(docs)
+    result = await ingest(svc, b"x" * 10, quota=IngestQuota(storage_mb=1))
+    assert result.document.byte_size == 10
+
+
+@pytest.mark.asyncio
+async def test_unlimited_storage_does_not_query_usage():
+    docs = FakeDocuments(bytes_used=10**12)
+    svc, _, _ = service(docs)
+    await ingest(svc, b"x" * 10, quota=IngestQuota())
+    assert "storage_bytes" not in docs.calls
 
 
 # --- pages_per_document -----------------------------------------------------

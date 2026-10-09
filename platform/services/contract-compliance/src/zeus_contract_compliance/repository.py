@@ -458,6 +458,33 @@ class DocumentRepository:
         )
         return int((row or {}).get("n") or 0)
 
+    async def storage_bytes(self, tenant_id: str) -> int:
+        """Bytes this tenant currently stores. Deleted documents free space."""
+        row = await self._db.fetch_one(
+            "SELECT COALESCE(sum(byte_size), 0)::bigint AS n "
+            "FROM contract_compliance.documents WHERE tenant_id = $1",
+            tenant_id,
+        )
+        return int((row or {}).get("n") or 0)
+
+    async def ai_usage_this_month(self, tenant_id: str, module_id: str) -> tuple[int, float]:
+        """(tokens, cost_usd) this UTC month, from the trigger-maintained
+        counter (platform-core 0022) -- one primary-key lookup, never a sum
+        over the append-only ai_usage ledger."""
+        row = await self._db.fetch_one(
+            """
+            SELECT tokens, cost_usd
+              FROM platform.ai_usage_monthly
+             WHERE tenant_id = $1 AND module_id = $2
+               AND month = date_trunc('month', now() AT TIME ZONE 'utc')::date
+            """,
+            tenant_id,
+            module_id,
+        )
+        if not row:
+            return 0, 0.0
+        return int(row["tokens"] or 0), float(row["cost_usd"] or 0)
+
     async def documents_this_month(self, tenant_id: str) -> int:
         """Documents ingested by this tenant since the start of the month."""
         row = await self._db.fetch_one(
