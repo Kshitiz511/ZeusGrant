@@ -210,7 +210,11 @@ def test_prerendered_routes_serve_their_own_html_without_redirect(monkeypatch):
     monkeypatch.setattr(cc_app.state.container, "startup", _noop)
 
     client = TestClient(app)
-    pages = (("/privacy", "Privacy Policy"), ("/terms", "Terms of Service"), ("/pricing", "Pricing"))
+    pages = (
+        ("/privacy", "Privacy Policy"),
+        ("/terms", "Terms of Service"),
+        ("/pricing", "Pricing"),
+    )
     for path, title in pages:
         res = client.get(path, follow_redirects=False)
         assert res.status_code == 200, path
