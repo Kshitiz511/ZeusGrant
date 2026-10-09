@@ -17,7 +17,7 @@
       "source": "/(pricing|privacy|terms|login|signup)",
       "destination": "/$1/index.html"
     },
-    { "source": "/((?!api/|assets/|__probe/).+)", "destination": "/_spa.html" }
+    { "source": "/((?!api/|assets/|__probe/)[^.]+)", "destination": "/_spa.html" }
   ],
   "headers": [
     {
