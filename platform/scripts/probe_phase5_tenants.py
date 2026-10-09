@@ -238,25 +238,37 @@ async def main() -> int:
         )
         check(len(visible) == 2, "an admin session with no tenant bound sees them all")
 
-        # Known gap, recorded rather than hidden: platform.tenants has no RLS.
-        #
-        # Every table carrying a tenant_id column is row-isolated. tenants and
-        # users are not, because they are keyed by `id` and the standard policy
-        # predicate does not apply to them -- and because token exchange and
-        # signup have to read them before any tenant is bound. Isolation for
-        # those two is therefore an application-layer property only.
-        #
-        # This asserts the gap as it currently stands. If someone adds RLS to
-        # platform.tenants, this check fails and forces them to come back here
-        # and delete the note, rather than leaving a comment that has quietly
-        # become false.
-        tenants_rls = await db.fetch_one(
-            "SELECT relrowsecurity FROM pg_class WHERE oid = 'platform.tenants'::regclass"
-        )
-        check(
-            tenants_rls is not None and tenants_rls["relrowsecurity"] is False,
-            "platform.tenants has no RLS (known gap; isolation is application-layer)",
-        )
+        # D16, closed by migration 0020: tenants and users are row-isolated
+        # once a tenant is bound, and fully visible to the unscoped auth and
+        # admin paths that must read them before any tenant exists.
+        for table in ("tenants", "users"):
+            rls = await db.fetch_one(
+                "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
+                f"WHERE oid = 'platform.{table}'::regclass"
+            )
+            check(
+                bool(rls and rls["relrowsecurity"] and rls["relforcerowsecurity"]),
+                f"platform.{table} has RLS enabled and forced (D16)",
+            )
+
+        with tenant_scope(str(uuid.uuid4())):
+            other_tenant = await db.fetch(
+                "SELECT id FROM platform.tenants WHERE id = $1", tenant_id
+            )
+            other_owner = await db.fetch(
+                "SELECT id FROM platform.users WHERE id = $1", user_id
+            )
+        check(other_tenant == [], "a tenant-scoped session cannot read another tenant row")
+        check(other_owner == [], "a tenant-scoped session cannot read a non-member user")
+
+        with tenant_scope(tenant_id):
+            own_tenant = await db.fetch(
+                "SELECT id FROM platform.tenants WHERE id = $1", tenant_id
+            )
+        check(len(own_tenant) == 1, "a tenant-scoped session sees its own tenant row")
+
+        unscoped = await db.fetch("SELECT id FROM platform.users WHERE id = $1", user_id)
+        check(len(unscoped) == 1, "an unscoped session (auth/admin) still reads users")
 
         # --- deletion cascades ------------------------------------------------
         await db.execute("DELETE FROM platform.tenants WHERE id = $1", tenant_id)

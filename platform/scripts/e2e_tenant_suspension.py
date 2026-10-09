@@ -102,7 +102,8 @@ def main() -> int:
     )
     # 502 = the account exists but the verification email could not be sent
     # (Q9, Resend). Not what is under test, so verify directly and continue.
-    if r.status_code == 502:
+    # 202 = sent but unverified (console mailer). Either way, verify directly.
+    if r.status_code in (202, 502):
         psql(f"UPDATE platform.users SET email_verified_at=now() WHERE email='{EMAIL}'")
         print("  note: verification email could not be sent (Q9); verified directly.")
         r = c.post("/auth/login", json={"email": EMAIL, "password": PASSWORD})

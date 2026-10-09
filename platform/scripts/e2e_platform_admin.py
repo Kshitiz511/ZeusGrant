@@ -59,7 +59,8 @@ def main() -> int:
     # (Q9 -- Resend is unreliable). That is not the thing under test here, so
     # the account is verified directly and the probe carries on. If signup
     # itself failed, nothing below would be meaningful.
-    if r.status_code == 502:
+    # 202 = sent but unverified (console mailer). Either way, verify directly.
+    if r.status_code in (202, 502):
         subprocess.run(
             ["docker", "exec", "zeus-platform-postgres-1", "psql", "-U", "zeus", "-d", "zeus",
              "-c", f"UPDATE platform.users SET email_verified_at=now() WHERE email='{EMAIL}'"],
