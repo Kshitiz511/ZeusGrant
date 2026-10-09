@@ -100,7 +100,15 @@ export function SignupView({ navigate }: { navigate: (to: string) => void }) {
             Create account
           </Button>
           <p className="text-center text-xs text-muted-foreground">
-            By creating an account you agree to our terms and privacy policy.
+            By creating an account you agree to our{" "}
+            <a href="/terms" target="_blank" rel="noopener" className="underline hover:text-primary">
+              Terms of Service
+            </a>{" "}
+            and{" "}
+            <a href="/privacy" target="_blank" rel="noopener" className="underline hover:text-primary">
+              Privacy Policy
+            </a>
+            .
           </p>
         </form>
       </div>

@@ -187,6 +187,15 @@ if _DIST.is_dir():
         """
 
         async def get_response(self, path: str, scope):  # type: ignore[override]
+            # Prerendered routes live at <route>/index.html. Serve them at the
+            # bare path: Starlette would otherwise 307 to a trailing slash,
+            # which the client router does not match and which disagrees with
+            # the canonical URL the page declares. super() still applies its
+            # own path-containment check.
+            if path and "." not in path.rsplit("/", 1)[-1]:
+                candidate = f"{path.strip('/')}/index.html"
+                if (_DIST / candidate).is_file():
+                    return await super().get_response(candidate, scope)
             try:
                 return await super().get_response(path, scope)
             except StarletteHTTPException as exc:
@@ -199,6 +208,11 @@ if _DIST.is_dir():
                 # route. Client routes in this console are extension-free.
                 if "." in request_path.rsplit("/", 1)[-1]:
                     raise
+                # _spa.html is the empty app shell; index.html is the
+                # prerendered landing page and would flash marketing copy on
+                # a deep link into the console.
+                if (_DIST / "_spa.html").is_file():
+                    return await super().get_response("_spa.html", scope)
                 return await super().get_response("index.html", scope)
 
     app.mount("/", _SpaFiles(directory=str(_DIST), html=True), name="console")

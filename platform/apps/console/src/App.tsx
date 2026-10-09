@@ -22,6 +22,8 @@ import { useAuth } from "@/lib/auth";
 import { useActiveModules, useContracts } from "@/lib/hooks";
 import { MODULES, moduleForRoute } from "@/lib/modules";
 import { useRoute } from "@/lib/router";
+import { LegalPage } from "@/components/site/LegalPage";
+import { PRIVACY, TERMS } from "@/content/legal";
 import type { Contract } from "@/lib/types";
 
 type View =
@@ -86,6 +88,11 @@ export default function App() {
 
   // The session cookie is checked before first paint. Showing the login form
   // during that round-trip would flash it at users who are already signed in.
+  // Legal pages are readable whether or not you are signed in, and do not
+  // wait on the session check.
+  if (path === "/privacy") return <LegalPage doc={PRIVACY} onNavigate={navigate} />;
+  if (path === "/terms") return <LegalPage doc={TERMS} onNavigate={navigate} />;
+
   if (isRestoring) return <Restoring />;
 
   if (!identity) {

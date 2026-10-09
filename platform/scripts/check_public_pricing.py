@@ -25,7 +25,7 @@ from zeus_platform_core.container import Container
 
 LANDING = (
     Path(__file__).resolve().parent.parent
-    / "apps/console/src/components/site/LandingPage.tsx"
+    / "apps/console/src/content/pricing.ts"
 )
 CATALOGUE = Path(__file__).resolve().parent.parent / "apps/console/src/lib/modules.ts"
 
@@ -43,7 +43,7 @@ async def main() -> int:
         (m["module"], int(m["price"])) for m in FROM_PRICE.finditer(CATALOGUE.read_text())
     ]
     if not tiers:
-        print("FAIL  no priced tiers found in LandingPage.tsx -- has the shape changed?")
+        print("FAIL  no priced tiers found in content/pricing.ts -- has the shape changed?")
         return 1
 
     container = Container()

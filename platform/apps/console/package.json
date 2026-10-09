@@ -6,7 +6,7 @@
   "description": "Zeus Platform console — thin, decoupled frontend over platform-core + module services. Shares the legacy Zeus Consulting design system.",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && node scripts/prerender.mjs",
     "preview": "vite preview --host --port 5173"
   },
   "dependencies": {

@@ -194,3 +194,40 @@ def test_missing_build_asset_404s_instead_of_returning_the_spa(monkeypatch):
 
 async def _noop() -> None:
     return None
+
+
+def test_prerendered_routes_serve_their_own_html_without_redirect(monkeypatch):
+    """Crawlers and the Ads reviewer must get each page's own markup at the
+    canonical URL -- not a 307 to a trailing slash, and not the app shell."""
+    from fastapi.testclient import TestClient
+
+    import api.index as entry
+
+    if not (entry._DIST / "privacy" / "index.html").exists():
+        pytest.skip("console not built with prerender")
+
+    monkeypatch.setattr(core_app.state.container, "startup", _noop)
+    monkeypatch.setattr(cc_app.state.container, "startup", _noop)
+
+    client = TestClient(app)
+    pages = (("/privacy", "Privacy Policy"), ("/terms", "Terms of Service"), ("/pricing", "Pricing"))
+    for path, title in pages:
+        res = client.get(path, follow_redirects=False)
+        assert res.status_code == 200, path
+        assert f"<title>{title}" in res.text, path
+
+
+def test_deep_link_gets_the_empty_shell_not_the_landing_copy(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import api.index as entry
+
+    if not (entry._DIST / "_spa.html").exists():
+        pytest.skip("console not built with prerender")
+
+    monkeypatch.setattr(core_app.state.container, "startup", _noop)
+    monkeypatch.setattr(cc_app.state.container, "startup", _noop)
+
+    res = TestClient(app).get("/contracts/123")
+    assert res.status_code == 200
+    assert '<div id="root"></div>' in res.text
