@@ -231,6 +231,9 @@ export const api = {
       inFlightRefresh = request<SessionResponse>(`${CORE}/auth/refresh`, {
         method: "POST",
         headers: { "x-csrf-token": readCookie(CSRF_COOKIE) ?? "" },
+        // A cold API start can be slow, but the app must never wait forever
+        // on a blank screen: past this, fall through to the login form.
+        signal: AbortSignal.timeout(20_000),
       }).finally(() => {
         inFlightRefresh = null;
       });

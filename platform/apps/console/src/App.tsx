@@ -114,9 +114,9 @@ export default function App() {
 
 function Restoring() {
   return (
-    <div className="flex min-h-screen items-center justify-center">
-      <Loader2 className="size-6 animate-spin text-muted-foreground" />
-      <span className="sr-only">Restoring your session</span>
+    <div className="flex min-h-screen flex-col items-center justify-center gap-3">
+      <Loader2 className="size-6 animate-spin text-primary" />
+      <span className="text-sm text-muted-foreground">Signing you in…</span>
     </div>
   );
 }
