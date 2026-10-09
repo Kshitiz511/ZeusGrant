@@ -127,13 +127,6 @@ function Authed({ view, setView }: { view: View; setView: (v: View) => void }) {
 
   const navigate = (key: string) => setView({ kind: "route", key });
 
-  // The operator console is not a page inside a workspace -- it spans every
-  // tenant -- so it renders outside AppShell rather than inside it. Putting it
-  // in the tenant sidebar would imply its contents were scoped to this tenant.
-  if (view.kind === "route" && view.key === "/admin") {
-    return <AdminPanel onExit={() => navigate("/compliance")} />;
-  }
-
   // The default landing route is Contract Compliance, which is wrong for a
   // tenant who only bought Grant Intelligence. Once entitlements arrive, move
   // them to the first service they actually have. Only fires while they are
@@ -147,6 +140,15 @@ function Authed({ view, setView }: { view: View; setView: (v: View) => void }) {
       if (first?.nav[0]) setView({ kind: "route", key: first.nav[0].to });
     }
   }, [isLoading, active, view, setView]);
+
+  // The operator console is not a page inside a workspace -- it spans every
+  // tenant -- so it renders outside AppShell rather than inside it. This
+  // return must stay below every hook above: returning earlier changes the
+  // hook count between renders (React error #300).
+  if (view.kind === "route" && view.key === "/admin") {
+    return <AdminPanel onExit={() => navigate("/compliance")} />;
+  }
+
   const openContract =
     view.kind === "contract"
       ? contracts?.find((c) => c.id === view.contractId) ?? null
