@@ -19,7 +19,11 @@ from pydantic import BaseModel
 
 from zeus_platform_core.container import Container
 from zeus_platform_core.security import ContainerDep
-from zeus_platform_core.services.auth_service import AuthError, EmailNotVerifiedError
+from zeus_platform_core.services.auth_service import (
+    AuthError,
+    EmailNotVerifiedError,
+    hash_password,
+)
 from zeus_platform_core.services.email_verification_service import VerificationError
 from zeus_platform_core.services.session_service import (
     IssuedSession,
@@ -201,6 +205,70 @@ async def resend_verification(body: ResendRequest, container: ContainerDep) -> d
             detail="Could not send the verification email. Try again shortly.",
         ) from None
     return {"status": "sent"}
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    email: str
+    code: str
+    password: str
+
+
+# One message for every failure that could otherwise reveal whether an
+# account exists for the address.
+_RESET_CODE_REJECTED = "That code is incorrect or has expired. Request a new one."
+
+
+@router.post("/password/forgot", status_code=status.HTTP_202_ACCEPTED)
+async def forgot_password(body: ForgotPasswordRequest, container: ContainerDep) -> dict:
+    """Email a reset code if the address has an account.
+
+    Always answers 202 with the same body: unknown address, rate limit and
+    delivery failure all look identical from outside, so this endpoint cannot
+    be used to discover who has an account.
+    """
+    user = await container.tenants.get_user_by_email(body.email.strip().lower())
+    if user is None:
+        return {"status": "sent"}
+    try:
+        await container.email_verification.send_reset_code(
+            user_id=str(user["id"]),
+            email=str(user["email"]),
+            full_name=user.get("full_name"),
+        )
+    except VerificationError:
+        logger.info("auth.reset_rate_limited user_id=%s", user["id"])
+    except Exception:
+        logger.exception("auth.reset_send_failed user_id=%s", user["id"])
+    return {"status": "sent"}
+
+
+@router.post("/password/reset")
+async def reset_password(body: ResetPasswordRequest, container: ContainerDep) -> dict:
+    """Swap a valid reset code for a new password and sign out everywhere."""
+    if len(body.password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 8 characters.",
+        )
+    user = await container.tenants.get_user_by_email(body.email.strip().lower())
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_RESET_CODE_REJECTED)
+    user_id = str(user["id"])
+    try:
+        await container.email_verification.check_reset_code(user_id=user_id, code=body.code)
+    except VerificationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    await container.tenants.set_password_hash(user_id, hash_password(body.password))
+    # Whoever knew the old password may hold a live session; a reset that left
+    # it running would not actually lock them out.
+    await container.session_repo.revoke_all_for_user(user_id, "password_reset")
+    logger.info("auth.password_reset user_id=%s", user_id)
+    return {"status": "reset"}
 
 
 @router.post("/login", response_model=SessionResponse)

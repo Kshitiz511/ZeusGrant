@@ -176,7 +176,13 @@ class TenantRepository:
     # --- email verification -------------------------------------------------
 
     async def create_email_verification(
-        self, *, user_id: str, email: str, code_hash: str, ttl_minutes: int
+        self,
+        *,
+        user_id: str,
+        email: str,
+        code_hash: str,
+        ttl_minutes: int,
+        purpose: str = "verify",
     ) -> None:
         """Store a new verification code, superseding any earlier live one.
 
@@ -189,23 +195,27 @@ class TenantRepository:
             """
             UPDATE platform.email_verifications
                SET consumed_at = now()
-             WHERE user_id = $1 AND consumed_at IS NULL
+             WHERE user_id = $1 AND purpose = $2 AND consumed_at IS NULL
             """,
             user_id,
+            purpose,
         )
         await self._db.execute(
             """
             INSERT INTO platform.email_verifications
-                   (user_id, email, code_hash, expires_at)
-            VALUES ($1, $2, $3, now() + make_interval(mins => $4))
+                   (user_id, email, code_hash, expires_at, purpose)
+            VALUES ($1, $2, $3, now() + make_interval(mins => $4), $5)
             """,
             user_id,
             email,
             code_hash,
             ttl_minutes,
+            purpose,
         )
 
-    async def get_live_email_verification(self, user_id: str) -> dict | None:
+    async def get_live_email_verification(
+        self, user_id: str, purpose: str = "verify"
+    ) -> dict | None:
         """Return the current unconsumed code row, expired or not.
 
         Expiry is judged by the caller so it can tell the user their code has
@@ -216,11 +226,12 @@ class TenantRepository:
             """
             SELECT id, code_hash, attempts, expires_at
               FROM platform.email_verifications
-             WHERE user_id = $1 AND consumed_at IS NULL
+             WHERE user_id = $1 AND purpose = $2 AND consumed_at IS NULL
              ORDER BY created_at DESC
              LIMIT 1
             """,
             user_id,
+            purpose,
         )
         return dict(row) if row else None
 
@@ -248,7 +259,9 @@ class TenantRepository:
             verification_id,
         )
 
-    async def count_recent_verifications(self, user_id: str, *, within_minutes: int) -> int:
+    async def count_recent_verifications(
+        self, user_id: str, *, within_minutes: int, purpose: str = "verify"
+    ) -> int:
         """How many codes this user has been sent recently.
 
         Each send costs money and lands in someone's inbox, so an unthrottled
@@ -260,10 +273,12 @@ class TenantRepository:
             SELECT count(*) AS n
               FROM platform.email_verifications
              WHERE user_id = $1
+               AND purpose = $3
                AND created_at > now() - make_interval(mins => $2)
             """,
             user_id,
             within_minutes,
+            purpose,
         )
         return int(row["n"]) if row else 0
 

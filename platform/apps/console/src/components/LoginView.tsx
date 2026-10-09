@@ -68,6 +68,15 @@ export function LoginView({ navigate }: { navigate: (to: string) => void }) {
               required
             />
           </Field>
+          <div className="-mt-2 text-right">
+            <button
+              type="button"
+              className="text-sm font-medium text-primary hover:underline"
+              onClick={() => navigate("/reset-password")}
+            >
+              Forgot password?
+            </button>
+          </div>
 
           {(error || callbackError) && <ErrorNote>{error ?? callbackError}</ErrorNote>}
 

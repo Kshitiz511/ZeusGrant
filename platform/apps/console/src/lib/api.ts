@@ -184,6 +184,20 @@ export const api = {
       body: JSON.stringify({ user_id: userId }),
     }),
 
+  /** Email a reset code. Always succeeds, whether or not the address exists. */
+  forgotPassword: (email: string) =>
+    request<{ status: string }>(`${CORE}/auth/password/forgot`, {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+
+  /** Swap a reset code for a new password. Signs out every existing session. */
+  resetPassword: (email: string, code: string, password: string) =>
+    request<{ status: string }>(`${CORE}/auth/password/reset`, {
+      method: "POST",
+      body: JSON.stringify({ email, code, password }),
+    }),
+
   /**
    * Which sign-in methods this deployment can actually offer.
    *

@@ -11,6 +11,7 @@ import { LoginView } from "@/components/LoginView";
 import { MatchesView } from "@/components/MatchesView";
 import { SettingsView } from "@/components/SettingsView";
 import { SignupView } from "@/components/SignupView";
+import { ResetPasswordView } from "@/components/ResetPasswordView";
 import { LandingPage } from "@/components/site/LandingPage";
 import { TasksView } from "@/components/TasksView";
 import { TeamView } from "@/components/TeamView";
@@ -77,7 +78,8 @@ export default function App() {
   // Rewriting the address stops the back button from returning them to a login
   // form they no longer need. This runs as an effect, not during render, and
   // sits above the early returns so the hook order never changes.
-  const onPublicPath = path === "/" || path === "/login" || path === "/signup";
+  const onPublicPath =
+    path === "/" || path === "/login" || path === "/signup" || path === "/reset-password";
   useEffect(() => {
     if (identity && onPublicPath) navigate("/app", { replace: true });
   }, [identity, onPublicPath, navigate]);
@@ -93,6 +95,7 @@ export default function App() {
     if (pendingUser) return <VerifyEmailView />;
     if (path === "/login") return <LoginView navigate={navigate} />;
     if (path === "/signup") return <SignupView navigate={navigate} />;
+    if (path === "/reset-password") return <ResetPasswordView navigate={navigate} />;
     // Anything else, including deep links into the console, lands on the
     // marketing page rather than a 404. The deep link is lost, but a stranger
     // seeing the product beats a stranger seeing an error.

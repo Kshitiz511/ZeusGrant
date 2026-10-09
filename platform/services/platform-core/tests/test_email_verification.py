@@ -124,7 +124,7 @@ async def test_an_expired_code_is_rejected():
 @pytest.mark.asyncio
 async def test_verifying_with_no_pending_code_is_rejected():
     email = RecordingEmail()
-    with pytest.raises(VerificationError, match="No verification code"):
+    with pytest.raises(VerificationError, match="No code is pending"):
         await _service(_db(), email).verify(user_id=USER_ID, code="111111")
 
 
@@ -159,3 +159,57 @@ async def test_the_plaintext_code_is_never_stored():
     code = email.last_code
     for _kind, _sql, args in db.calls:
         assert code not in [str(a) for a in args]
+
+
+# --- password reset -------------------------------------------------------
+
+
+def _purposes(db: FakeDatabase) -> set[str]:
+    return {
+        str(a)
+        for _kind, sql, args in db.calls
+        if "email_verifications" in sql
+        for a in args
+        if a in ("verify", "password_reset")
+    }
+
+
+@pytest.mark.asyncio
+async def test_reset_codes_are_stored_and_looked_up_under_their_own_purpose():
+    """A signup code must never be spendable as a reset code, or vice versa."""
+    email = RecordingEmail()
+    db = _db()
+    await _service(db, email).send_reset_code(user_id=USER_ID, email=EMAIL)
+    assert "password reset" in email.sent[-1]["subject"]
+    assert _purposes(db) == {"password_reset"}
+
+    code = email.last_code
+    checked = _db(code_hash=_hash_code(code))
+    await _service(checked, email).check_reset_code(user_id=USER_ID, code=code)
+    assert _purposes(checked) == {"password_reset"}
+    assert any("SET consumed_at = now() WHERE id" in sql for _k, sql, _a in checked.calls)
+
+
+@pytest.mark.asyncio
+async def test_verification_stays_on_the_verify_purpose():
+    email = RecordingEmail()
+    db = _db()
+    await _service(db, email).send_code(user_id=USER_ID, email=EMAIL)
+    assert _purposes(db) == {"verify"}
+
+
+@pytest.mark.asyncio
+async def test_reset_code_has_the_same_attempt_cap():
+    email = RecordingEmail()
+    db = _db(code_hash=_hash_code("111111"), attempts=MAX_ATTEMPTS)
+    with pytest.raises(VerificationError, match="Too many"):
+        await _service(db, email).check_reset_code(user_id=USER_ID, code="111111")
+
+
+@pytest.mark.asyncio
+async def test_reset_sends_are_rate_limited():
+    email = RecordingEmail()
+    db = _db(recent_sends=MAX_SENDS_PER_HOUR)
+    with pytest.raises(VerificationError, match="Too many"):
+        await _service(db, email).send_reset_code(user_id=USER_ID, email=EMAIL)
+    assert email.sent == []

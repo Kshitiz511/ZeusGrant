@@ -28,6 +28,9 @@ MAX_ATTEMPTS = 10
 # Sends allowed per hour, counting the one at signup.
 MAX_SENDS_PER_HOUR = 5
 
+PURPOSE_VERIFY = "verify"
+PURPOSE_RESET = "password_reset"
+
 
 class VerificationError(Exception):
     """Raised for verification failures; the message is safe to show a user."""
@@ -57,22 +60,8 @@ class EmailVerificationService:
         self._ttl = ttl_minutes
 
     async def send_code(self, *, user_id: str, email: str, full_name: str | None = None) -> None:
-        """Generate, store and deliver a fresh code."""
-        recent = await self._tenants.count_recent_verifications(user_id, within_minutes=60)
-        if recent >= MAX_SENDS_PER_HOUR:
-            raise VerificationError(
-                "Too many verification emails requested. Try again in an hour."
-            )
-
-        # secrets, not random: this value guards account access.
-        code = f"{secrets.randbelow(1_000_000):06d}"
-        await self._tenants.create_email_verification(
-            user_id=user_id,
-            email=email,
-            code_hash=_hash_code(code),
-            ttl_minutes=self._ttl,
-        )
-
+        """Generate, store and deliver a fresh verification code."""
+        code = await self._issue(user_id=user_id, email=email, purpose=PURPOSE_VERIFY)
         greeting = f"Hi {full_name.split()[0]}," if full_name else "Hi,"
         await self._email.send(
             to=email,
@@ -91,10 +80,62 @@ class EmailVerificationService:
 
         Raises :class:`VerificationError` on any failure.
         """
+        await self._check(user_id=user_id, code=code, purpose=PURPOSE_VERIFY)
+        await self._tenants.mark_email_verified(user_id)
+        log.info("auth.email_verified user_id=%s", user_id)
+
+    async def send_reset_code(
+        self, *, user_id: str, email: str, full_name: str | None = None
+    ) -> None:
+        """Generate, store and deliver a password reset code."""
+        code = await self._issue(user_id=user_id, email=email, purpose=PURPOSE_RESET)
+        greeting = f"Hi {full_name.split()[0]}," if full_name else "Hi,"
+        await self._email.send(
+            to=email,
+            subject=f"{code} is your Zeus password reset code",
+            text=(
+                f"{greeting}\n\n"
+                f"Your password reset code is {code}\n\n"
+                f"It expires in {self._ttl} minutes.\n\n"
+                "If you didn't ask to reset your password, ignore this email -- "
+                "your password has not changed.\n"
+            ),
+        )
+        log.info("auth.reset_sent user_id=%s", user_id)
+
+    async def check_reset_code(self, *, user_id: str, code: str) -> None:
+        """Consume a reset code; the caller then sets the new password.
+
+        Receiving the code proves control of the inbox, so the address is also
+        marked verified -- a user who never finished signup can recover here.
+        """
+        await self._check(user_id=user_id, code=code, purpose=PURPOSE_RESET)
+        await self._tenants.mark_email_verified(user_id)
+        log.info("auth.reset_code_accepted user_id=%s", user_id)
+
+    async def _issue(self, *, user_id: str, email: str, purpose: str) -> str:
+        recent = await self._tenants.count_recent_verifications(
+            user_id, within_minutes=60, purpose=purpose
+        )
+        if recent >= MAX_SENDS_PER_HOUR:
+            raise VerificationError("Too many codes requested. Try again in an hour.")
+
+        # secrets, not random: this value guards account access.
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        await self._tenants.create_email_verification(
+            user_id=user_id,
+            email=email,
+            code_hash=_hash_code(code),
+            ttl_minutes=self._ttl,
+            purpose=purpose,
+        )
+        return code
+
+    async def _check(self, *, user_id: str, code: str, purpose: str) -> None:
         code = code.strip().replace(" ", "")
-        record = await self._tenants.get_live_email_verification(user_id)
+        record = await self._tenants.get_live_email_verification(user_id, purpose)
         if record is None:
-            raise VerificationError("No verification code is pending. Request a new one.")
+            raise VerificationError("No code is pending. Request a new one.")
 
         if record["attempts"] >= MAX_ATTEMPTS:
             raise VerificationError("Too many incorrect attempts. Request a new code.")
@@ -121,5 +162,3 @@ class EmailVerificationService:
             )
 
         await self._tenants.consume_email_verification(str(record["id"]))
-        await self._tenants.mark_email_verified(user_id)
-        log.info("auth.email_verified user_id=%s", user_id)

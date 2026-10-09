@@ -84,6 +84,18 @@ class SessionRepository:
             reason,
         )
 
+    async def revoke_all_for_user(self, user_id: str, reason: str) -> None:
+        """Kill every live session a user holds, on every device."""
+        await self._db.execute(
+            """
+            UPDATE platform.user_sessions
+            SET revoked_at = now(), revoked_reason = $2
+            WHERE user_id = $1 AND revoked_at IS NULL
+            """,
+            user_id,
+            reason,
+        )
+
     async def delete_expired(self) -> None:
         """Housekeeping: drop rows that can no longer authenticate anyone."""
         await self._db.execute(
